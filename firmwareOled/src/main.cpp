@@ -10,6 +10,14 @@
 #include <driver/adc.h>
 #include <math.h> // Para usar pow() y floor()
 
+// Funciones OTA
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+
+// -------------------------
+// Pines y Constantes
+// -------------------------
+
 // Pines I²C
 #define SDA_PIN 4
 #define SCL_PIN 5
@@ -23,43 +31,62 @@
 
 // Pines de botones
 #define BUTTON_ALTITUDE 6  // En modo normal: reinicia altitud; en menú: cicla opciones
-#define BUTTON_OLED     8  // En modo normal: suspende/reactiva pantalla; en menú: aplica opción actual
+#define BUTTON_OLED     8  // Suspende/reactiva pantalla en modo normal; en menú: aplica opción actual
 #define BUTTON_MENU     7  // Abre/cierra el menú
 
-// BLE - UUIDs
+// BLE – Servicio principal y característica
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
-// Variables de estado
+// BLE – Servicio DFU (para OTA)
+#define DFU_SERVICE_UUID         "e3c0f200-3b0b-4253-9f53-3a351d8a146e"
+#define DFU_CHARACTERISTIC_UUID  "e3c0f201-3b0b-4253-9f53-3a351d8a146e"
+
+// -------------------------
+// Variables Globales
+// -------------------------
+
 bool pantallaEncendida = true;
 bool menuActivo = false;
-int menuOpcion = 0;  // Opciones: 0: Unidad, 1: Brillo, 2: Formato Altura, 3: Bateria
+// Opciones del menú:
+// 0: Unidad, 1: Brillo, 2: Formato Altura, 3: Batería, 4: BLE
+int menuOpcion = 0;
 unsigned long menuStartTime = 0;
 int brilloPantalla = 255;
 bool unidadMetros = false;  // false = pies, true = metros
-// altFormat: 0 = normal (muestra altitud completa sin escalado),
-// 1,2,3 = se aplica escala (multiplicación por 10^-3) y se muestra con ese número de decimales.
-int altFormat = 0;  // Por defecto en modo "normal"
-bool batteryMenuActive = false;  // Vista "Bateria" en el menú
+// altFormat: 0 = normal, 1..3 = decimales
+int altFormat = 0;
+// Variable para vista detallada de batería en el menú
+bool batteryMenuActive = false;
 
-// Variables para la actualización del porcentaje de batería
+// Estado del BLE (true: ON, false: OFF)
+bool bleActivo = true;
+
+// Variables para actualización de batería (cada 5 s)
 unsigned long lastBatteryUpdate = 0;
-const unsigned long batteryUpdateInterval = 5000; // 5000 ms = 5 segundos
+const unsigned long batteryUpdateInterval = 5000;
 int cachedBatteryPercentage = 0;
 
-// Inicializar OLED (128x64)
+// -------------------------
+// Inicialización de Hardware
+// -------------------------
+
+// OLED (128x64)
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 // Sensor BMP390L
 Adafruit_BMP3XX bmp;
 
-// Altitud de referencia (por defecto 0)
+// Altitud de referencia (para altitud relativa)
 float altitudReferencia = 0.0;
 
-// BLE
-BLECharacteristic *pCharacteristic;
+// BLE – Característica principal
+NimBLECharacteristic *pCharacteristic = nullptr;
 
-// Función para calcular porcentaje de batería a partir del voltaje
+// -------------------------
+// Funciones Auxiliares
+// -------------------------
+
 int calcularPorcentajeBateria(float voltaje) {
   if (voltaje >= 4.2) return 100;
   if (voltaje >= 4.1) return 95;
@@ -73,58 +100,133 @@ int calcularPorcentajeBateria(float voltaje) {
   return 5;
 }
 
-// Función para actualizar la lectura de la batería (cada batteryUpdateInterval ms)
 void updateBatteryReading() {
   if (millis() - lastBatteryUpdate >= batteryUpdateInterval) {
     int lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);
-    float voltajeADC = (lecturaADC / 4095.0) * 2.6;  // Lectura ADC real
+    float voltajeADC = (lecturaADC / 4095.0) * 2.6;  // Voltaje en V
     float v_adc = voltajeADC;
-    float v_bat = v_adc * 2.0; // Se usa solo multiplicación por 2
+    float v_bat = v_adc * 2.0;
     cachedBatteryPercentage = calcularPorcentajeBateria(v_bat);
     lastBatteryUpdate = millis();
   }
 }
 
-// -----------------------------------------------------------------------------
-// Configurar BLE
-// -----------------------------------------------------------------------------
+// -------------------------
+// DFU OTA vía BLE
+// -------------------------
+
+esp_ota_handle_t ota_handle = 0;
+const esp_partition_t* update_partition = NULL;
+bool dfu_in_progress = false;
+
+class MyDFUCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *pCharacteristic) {
+    std::string value = pCharacteristic->getValue();
+    if (value.size() > 0) {
+      if (!dfu_in_progress) {
+        update_partition = esp_ota_get_next_update_partition(NULL);
+        if (update_partition == NULL) {
+          Serial.println("No hay partición OTA disponible");
+          return;
+        }
+        esp_err_t err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
+        if (err != ESP_OK) {
+          Serial.println("esp_ota_begin falló");
+          return;
+        }
+        dfu_in_progress = true;
+        Serial.println("Actualización DFU iniciada");
+      }
+      if (value == "EOF") {
+        esp_err_t err = esp_ota_end(ota_handle);
+        if (err != ESP_OK) {
+          Serial.println("esp_ota_end falló");
+        } else {
+          err = esp_ota_set_boot_partition(update_partition);
+          if (err != ESP_OK) {
+            Serial.println("esp_ota_set_boot_partition falló");
+          } else {
+            Serial.println("Actualización OTA exitosa, reiniciando...");
+            esp_restart();
+          }
+        }
+      } else {
+        esp_err_t err = esp_ota_write(ota_handle, value.data(), value.size());
+        if (err != ESP_OK) {
+          Serial.println("esp_ota_write falló");
+        } else {
+          Serial.print("Chunk recibido, tamaño: ");
+          Serial.println(value.size());
+        }
+      }
+    }
+  }
+};
+
+void setupDFU() {
+  NimBLEServer* pServer = NimBLEDevice::getServer();
+  if (!pServer) {
+    Serial.println("Servidor BLE no disponible para DFU");
+    return;
+  }
+  NimBLEService *pDFUService = pServer->createService(DFU_SERVICE_UUID);
+  NimBLECharacteristic *pDFUCharacteristic = pDFUService->createCharacteristic(
+      DFU_CHARACTERISTIC_UUID,
+      NIMBLE_PROPERTY::WRITE
+  );
+  pDFUCharacteristic->setCallbacks(new MyDFUCallbacks());
+  pDFUService->start();
+  NimBLEDevice::getAdvertising()->addServiceUUID(DFU_SERVICE_UUID);
+  Serial.println("Servicio DFU iniciado");
+}
+
+// -------------------------
+// Configurar BLE (servicio principal y DFU)
+// -------------------------
 void setupBLE() {
   Serial.println("Inicializando BLE...");
   NimBLEDevice::init("");
-  NimBLEDevice::setDeviceName("ESP32-Altimetro");
-
+  NimBLEDevice::setDeviceName("ESP32-Altimetro-ota");
   NimBLEServer *pServer = NimBLEDevice::createServer();
   Serial.println("Servidor BLE creado");
-
   NimBLEService *pService = pServer->createService(SERVICE_UUID);
-  Serial.println("Servicio BLE creado");
-
+  Serial.println("Servicio principal BLE creado");
   pCharacteristic = pService->createCharacteristic(
       CHARACTERISTIC_UUID,
       NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
   );
-  Serial.println("Característica BLE creada");
-
+  Serial.println("Característica principal BLE creada");
   pService->start();
-  Serial.println("Servicio BLE iniciado");
-
+  Serial.println("Servicio principal BLE iniciado");
+  setupDFU();
   NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
   NimBLEAdvertisementData advData;
-  advData.setName("ESP32-Altimetro");
+  advData.setName("ESP32-Altimetro-ota");
   advData.setCompleteServices(pService->getUUID());
   pAdvertising->setAdvertisementData(advData);
-
   NimBLEAdvertisementData scanData;
   scanData.setName("ESP32-Altimetro");
   pAdvertising->setScanResponseData(scanData);
-
   pAdvertising->start();
   Serial.println("BLE advertising iniciado");
 }
 
-// -----------------------------------------------------------------------------
+// Función para apagar/encender BLE mediante publicidad
+void toggleBLE() {
+  bleActivo = !bleActivo;
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  if (!bleActivo) {
+    adv->stop();
+    Serial.println("BLE advertising stopped");
+  } else {
+    adv->start();
+    Serial.println("BLE advertising started");
+  }
+}
+
+// -------------------------
 // SETUP
-// -----------------------------------------------------------------------------
+// -------------------------
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -145,30 +247,24 @@ void setup() {
   bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
   bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
 
-  // No se modifica altitudReferencia al arrancar; se muestra la lectura real
-
   pinMode(BUTTON_ALTITUDE, INPUT_PULLUP);
   pinMode(BUTTON_OLED, INPUT_PULLUP);
   pinMode(BUTTON_MENU, INPUT_PULLUP);
 
   adc1_config_width(ADC_WIDTH_BIT_12);
-  adc1_config_channel_atten(ADC1_CHANNEL_1, ADC_ATTEN_DB_11);
+  adc1_config_channel_atten(ADC1_CHANNEL_1, ADC_ATTEN_DB_12);
 
   Serial.println("Setup completado");
 }
 
-// -----------------------------------------------------------------------------
+// -------------------------
 // LOOP
-// -----------------------------------------------------------------------------
+// -------------------------
 void loop() {
-  // Leer sensor BMP
   bool sensorOk = bmp.performReading();
   float altitudActual = sensorOk ? bmp.readAltitude(1013.25) : 0;
 
-  // -------------------------------
   // Gestión de botones
-  // -------------------------------
-  // BOTÓN MENU (pin 8): abre o cierra el menú (sin modificar la opción actual)
   if (digitalRead(BUTTON_MENU) == LOW) {
     menuActivo = !menuActivo;
     if (menuActivo) {
@@ -182,18 +278,18 @@ void loop() {
     delay(50);
   }
 
-  // BOTÓN ALTITUDE (pin 6): en modo menú, cicla entre opciones; en modo normal, reinicia altitud
   if (digitalRead(BUTTON_ALTITUDE) == LOW) {
     if (menuActivo) {
-      menuOpcion = (menuOpcion + 1) % 4;
-      if(menuOpcion != 3) batteryMenuActive = false;
+      menuOpcion = (menuOpcion + 1) % 5; // 5 opciones: 0..4
+      if (menuOpcion != 3) batteryMenuActive = false;
       menuStartTime = millis();
       Serial.print("Opción del menú cambiada a: ");
-      switch(menuOpcion) {
+      switch (menuOpcion) {
         case 0: Serial.println("Unidad"); break;
         case 1: Serial.println("Brillo"); break;
         case 2: Serial.println("Formato Altura"); break;
-        case 3: Serial.println("Bateria"); break;
+        case 3: Serial.println("Batería"); break;
+        case 4: Serial.println("BL"); break;
       }
     } else {
       altitudReferencia = altitudActual;
@@ -202,10 +298,9 @@ void loop() {
     delay(50);
   }
 
-  // BOTÓN OLED (pin 7): en modo menú, aplica la opción; en modo normal, suspende/reactiva la pantalla
   if (digitalRead(BUTTON_OLED) == LOW) {
     if (menuActivo) {
-      switch(menuOpcion) {
+      switch (menuOpcion) {
         case 0:
           unidadMetros = !unidadMetros;
           Serial.print("Unidad cambiada a: ");
@@ -221,7 +316,7 @@ void loop() {
         case 2:
           altFormat = (altFormat + 1) % 4;
           Serial.print("Formato de altitud cambiado a: ");
-          switch(altFormat) {
+          switch (altFormat) {
             case 0: Serial.println("normal"); break;
             case 1: Serial.println("1 decimal"); break;
             case 2: Serial.println("2 decimales"); break;
@@ -230,8 +325,13 @@ void loop() {
           break;
         case 3:
           batteryMenuActive = !batteryMenuActive;
-          Serial.print("Vista Bateria en menú: ");
+          Serial.print("Vista Batería en menú: ");
           Serial.println(batteryMenuActive ? "ON" : "OFF");
+          break;
+        case 4:
+          toggleBLE();
+          Serial.print("BLE ahora está: ");
+          Serial.println(bleActivo ? "ON" : "OFF");
           break;
       }
       menuStartTime = millis();
@@ -249,21 +349,17 @@ void loop() {
     delay(50);
   }
 
-  // Cerrar menú automáticamente tras 7 s de inactividad
   if (menuActivo && (millis() - menuStartTime > 7000)) {
     menuActivo = false;
     batteryMenuActive = false;
     Serial.println("Menú cerrado por timeout.");
   }
 
-  // -------------------------------
-  // Actualización de la batería (cada 5 s)
   updateBatteryReading();
-  
+
   // Visualización y envío vía BLE
   if (menuActivo) {
     if (batteryMenuActive) {
-      // Vista "Bateria" en el menú
       if (pantallaEncendida) {
         int lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);
         float voltajeADC = (lecturaADC / 4095.0) * 2.6;
@@ -271,71 +367,79 @@ void loop() {
         float v_bat = v_adc * 2.0; // Sin factor de corrección
         u8g2.clearBuffer();
         u8g2.setFont(u8g2_font_ncenB08_tr);
-        u8g2.setCursor(0, 12);
-        u8g2.print("Bateria:");
-        u8g2.setCursor(0, 26);
+        u8g2.setCursor(0,12);
+        u8g2.print("BATERIA:");
+        u8g2.setCursor(0,26);
         u8g2.print("ADC: ");
-        u8g2.setCursor(50, 26);
+        u8g2.setCursor(50,26);
         u8g2.print(lecturaADC);
-        u8g2.setCursor(0, 40);
+        u8g2.setCursor(0,40);
         u8g2.print("V_ADC: ");
-        u8g2.setCursor(50, 40);
-        u8g2.print(v_adc, 2);
+        u8g2.setCursor(50,40);
+        u8g2.print(v_adc,2);
         u8g2.print("V");
-        u8g2.setCursor(0, 54);
+        u8g2.setCursor(0,54);
         u8g2.print("V_Bat: ");
-        u8g2.setCursor(50, 54);
-        u8g2.print(v_bat, 2);
+        u8g2.setCursor(50,54);
+        u8g2.print(v_bat,2);
         u8g2.sendBuffer();
       }
     } else {
-      // Menú normal: mostrar las 4 opciones en líneas ajustadas (y = 12, 24, 36, 48, y 60 para la última)
       if (pantallaEncendida) {
         u8g2.clearBuffer();
         u8g2.setFont(u8g2_font_ncenB08_tr);
-        u8g2.setCursor(0, 12);
+        u8g2.setCursor(0,12);
         u8g2.print("MENU:");
-        u8g2.setCursor(0, 24);
+        u8g2.setCursor(0,24);
         if (menuOpcion == 0)
           u8g2.print("> Unidad: ");
         else
           u8g2.print("  Unidad: ");
         u8g2.print(unidadMetros ? "metros" : "pies");
-        u8g2.setCursor(0, 36);
+  
+        u8g2.setCursor(0,36);
         if (menuOpcion == 1)
           u8g2.print("> Brillo: ");
         else
           u8g2.print("  Brillo: ");
         u8g2.print(brilloPantalla);
-        u8g2.setCursor(0, 48);
+  
+        u8g2.setCursor(0,48);
         if (menuOpcion == 2)
           u8g2.print("> Altura: ");
         else
           u8g2.print("  Altura: ");
-        switch(altFormat) {
+        switch (altFormat) {
           case 0: u8g2.print("normal"); break;
           case 1: u8g2.print("1 decimal"); break;
           case 2: u8g2.print("2 decimales"); break;
           case 3: u8g2.print("3 decimales"); break;
         }
-        u8g2.setCursor(0, 60);
+  
+        u8g2.setCursor(0,60);
         if (menuOpcion == 3)
           u8g2.print("> Bateria");
         else
           u8g2.print("  Bateria");
+  
+        // Mostrar opción BLE en la misma línea, a la derecha:
+        u8g2.setCursor(60,60);
+        if (menuOpcion == 4)
+          u8g2.print("> BL: " + String(bleActivo ? "ON" : "OFF"));
+        else
+          u8g2.print("  BL: " + String(bleActivo ? "ON" : "OFF"));
+  
         u8g2.sendBuffer();
       }
     }
   } else {
-    // Modo normal: pantalla principal muestra altitud en grande y porcentaje de batería en la esquina superior derecha.
     float altitudCorrigida = sensorOk ? (altitudActual - altitudReferencia) : 0;
-    if (!unidadMetros) {
+    if (!unidadMetros)
       altitudCorrigida *= 3.281;
-    }
     String altDisplay;
-    if (altFormat == 0) {
+    if (altFormat == 0)
       altDisplay = String((long)altitudCorrigida);
-    } else {
+    else {
       float altScaled = altitudCorrigida * 0.001;
       float altTrunc = floor(altScaled * pow(10, altFormat)) / pow(10, altFormat);
       altDisplay = String(altTrunc, altFormat);
@@ -344,27 +448,57 @@ void loop() {
     float voltajeADC = (lecturaADC / 4095.0) * 2.6;
     float v_adc = voltajeADC;
     float v_bat = v_adc * 2.0; // Sin factor de corrección
-    int porcentajeBateria = cachedBatteryPercentage; // Usar valor actualizado cada 5 s
-
+    int porcentajeBateria = cachedBatteryPercentage;
+  
     pCharacteristic->setValue(altDisplay.c_str());
     pCharacteristic->notify();
-
+  
     if (pantallaEncendida) {
       u8g2.clearBuffer();
-      // Usar una fuente ligeramente más pequeña para la altitud principal
-      u8g2.setFont(u8g2_font_fub20_tr);
-      String unitStr = (unidadMetros ? " m" : " ft");
-      String fullAlt = altDisplay + unitStr;
-      uint16_t totalWidth = u8g2.getStrWidth(fullAlt.c_str());
-      uint16_t xPos = (128 - totalWidth) / 2;
-      u8g2.setCursor(xPos, 40);
-      u8g2.print(fullAlt);
-      // Mostrar porcentaje de batería en la esquina superior derecha.
+      // Imprimir unidad en la esquina superior izquierda
+      u8g2.setFont(u8g2_font_ncenB08_tr);
+      u8g2.setCursor(2,12);
+      u8g2.print(unidadMetros ? "M" : "FT");
+      
+      // Agregar estatus BLE centrado en la parte superior:
+      u8g2.setFont(u8g2_font_ncenB08_tr);
+      String bleStr = "BL: " + String(bleActivo ? "ON" : "OFF");
+      uint16_t bleWidth = u8g2.getStrWidth(bleStr.c_str());
+      int xPosBle = (128 - bleWidth) / 2;
+      u8g2.setCursor(xPosBle,12);
+      u8g2.print(bleStr);
+      
+      // Mostrar porcentaje de batería en la esquina superior derecha
       u8g2.setFont(u8g2_font_ncenB08_tr);
       String batStr = String(porcentajeBateria) + "%";
       uint16_t batWidth = u8g2.getStrWidth(batStr.c_str());
-      u8g2.setCursor(128 - batWidth - 2, 12);
+      u8g2.setCursor(128 - batWidth - 2,12);
       u8g2.print(batStr);
+      
+      // Altitud grande centrada con fuente fub25
+      u8g2.setFont(u8g2_font_fub30_tr);
+      uint16_t yPosAlt = 50;
+      String altStr = "13000"; // Para altitud real, usar altDisplay
+      uint16_t altWidth = u8g2.getStrWidth(altStr.c_str());
+      int16_t xPosAlt = (128 - altWidth) / 2;
+      if (xPosAlt < 0) xPosAlt = 0;
+      u8g2.setCursor(xPosAlt, yPosAlt);
+      u8g2.print(altStr);
+      u8g2.drawHLine(0, 15, 128);  // Primera barra horizontal en y = 20
+      u8g2.drawHLine(0, 52, 128); 
+      u8g2.drawVLine(0, 0, 64);
+      u8g2.drawVLine(125, 0, 64);
+
+
+      
+      u8g2.setFont(u8g2_font_ncenB08_tr);
+      String user = "elDani"; // Para altitud real, usar altDisplay
+      uint16_t UserWidth = u8g2.getStrWidth(user.c_str());
+      int16_t xPosUser = (128 - UserWidth) / 2;
+      if (xPosAlt < 0) xPosAlt = 0;
+      u8g2.setCursor(xPosUser, 64);
+      u8g2.print(user);
+
       u8g2.sendBuffer();
     }
   }
