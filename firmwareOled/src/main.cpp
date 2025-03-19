@@ -8,11 +8,10 @@
 #include <NimBLEUtils.h>
 #include <NimBLE2904.h>
 #include <driver/adc.h>
-#include <math.h> // Para usar pow() y floor()
-
-// Funciones OTA
+#include <math.h>
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include <mbedtls/sha256.h>
 
 // -------------------------
 // Pines y Constantes
@@ -30,8 +29,8 @@
 #define BATTERY_PIN 1  
 
 // Pines de botones
-#define BUTTON_ALTITUDE 6  // En modo normal: reinicia altitud; en menú: cicla opciones
-#define BUTTON_OLED     8  // Suspende/reactiva pantalla en modo normal; en menú: aplica opción actual
+#define BUTTON_ALTITUDE 6  // Reinicia altitud o cicla opciones en menú/alerta
+#define BUTTON_OLED     8  // Apaga/reactiva la pantalla o confirma selección en menú/alerta
 #define BUTTON_MENU     7  // Abre/cierra el menú
 
 // BLE – Servicio principal y característica
@@ -48,31 +47,24 @@
 
 bool pantallaEncendida = true;
 bool menuActivo = false;
-// Opciones del menú:
-// 0: Unidad, 1: Brillo, 2: Formato Altura, 3: Batería, 4: BLE
 int menuOpcion = 0;
 unsigned long menuStartTime = 0;
 int brilloPantalla = 255;
 bool unidadMetros = false;  // false = pies, true = metros
-// altFormat: 0 = normal, 1..3 = decimales
 int altFormat = 0;
-// Variable para vista detallada de batería en el menú
 bool batteryMenuActive = false;
-
-// Estado del BLE (true: ON, false: OFF)
 bool bleActivo = true;
-
-// Variables para actualización de batería (cada 5 s)
 unsigned long lastBatteryUpdate = 0;
 const unsigned long batteryUpdateInterval = 5000;
 int cachedBatteryPercentage = 0;
 
-// -------------------------
-// Inicialización de Hardware
-// -------------------------
+// Variables para la cuenta regresiva de estabilización
+bool startupDone = false;
+unsigned long startupStartTime = 0;
+const unsigned long startupCountdownTime = 5000;  // 5 segundos
 
 // OLED (128x64)
-U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 // Sensor BMP390L
 Adafruit_BMP3XX bmp;
@@ -82,6 +74,28 @@ float altitudReferencia = 0.0;
 
 // BLE – Característica principal
 NimBLECharacteristic *pCharacteristic = nullptr;
+
+// Variables para OTA DFU
+esp_ota_handle_t ota_handle = 0;
+const esp_partition_t* update_partition = NULL;
+bool dfu_in_progress = false;
+
+// Variables para alerta de actualización OTA
+volatile bool otaConfirmationPending = false; // Activa modo confirmación
+volatile int otaConfirmationOption = 0;         // 0: Aceptar, 1: Cancelar
+
+// -------------------------
+// Variables para Validación de Integridad
+// -------------------------
+
+// Valor predefinido del hash esperado (32 bytes para SHA-256)
+// En producción este valor se debe definir o recibir de forma segura.
+uint8_t hashEsperado[32] = { /* Rellenar con el hash esperado */ };
+std::string firmaDigitalRecibida;
+
+// Contexto para cálculo incremental del hash
+mbedtls_sha256_context sha256_ctx;
+bool checksum_inicializado = false;
 
 // -------------------------
 // Funciones Auxiliares
@@ -111,14 +125,183 @@ void updateBatteryReading() {
   }
 }
 
+// Función para actualizar el checksum incrementalmente con cada chunk recibido
+void actualizarChecksum(const uint8_t* data, size_t len) {
+  if (!checksum_inicializado) {
+    mbedtls_sha256_init(&sha256_ctx);
+    mbedtls_sha256_starts_ret(&sha256_ctx, 0); // 0 para SHA-256
+    checksum_inicializado = true;
+  }
+  mbedtls_sha256_update_ret(&sha256_ctx, data, len);
+}
+
+// Función para calcular el hash completo de la imagen almacenada en la partición OTA
+void calcularHashFirmware(const esp_partition_t* partition, uint8_t* hashCalculado) {
+  const size_t bufferSize = 1024;
+  uint8_t buffer[bufferSize];
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  mbedtls_sha256_starts_ret(&ctx, 0);
+
+  size_t offset = 0;
+  size_t remaining = partition->size;
+  while (remaining > 0) {
+    size_t toRead = (remaining > bufferSize) ? bufferSize : remaining;
+    esp_err_t err = esp_partition_read(partition, offset, buffer, toRead);
+    if (err != ESP_OK) {
+      Serial.println("Error al leer la particion para hash");
+      break;
+    }
+    mbedtls_sha256_update_ret(&ctx, buffer, toRead);
+    offset += toRead;
+    remaining -= toRead;
+  }
+  mbedtls_sha256_finish_ret(&ctx, hashCalculado);
+  mbedtls_sha256_free(&ctx);
+}
+
+// Función para verificar la integridad del firmware comparando el hash calculado con el esperado
+bool verificarIntegridadFirmware() {
+  uint8_t hashCalculado[32];
+  calcularHashFirmware(update_partition, hashCalculado);
+  if(memcmp(hashCalculado, hashEsperado, 32) == 0) {
+    Serial.println("Integridad del firmware verificada correctamente.");
+    return true;
+  } else {
+    Serial.println("Error: Integridad del firmware fallida.");
+    return false;
+  }
+}
+
+// Función para almacenar y (posteriormente) verificar la firma digital recibida
+void almacenarFirmaDigital(const std::string& firma) {
+  firmaDigitalRecibida = firma;
+  // Aqui se deberia implementar la verificacion de la firma digital utilizando una clave publica.
+}
+
 // -------------------------
-// DFU OTA vía BLE
+// Función Base64 Decode
 // -------------------------
 
-esp_ota_handle_t ota_handle = 0;
-const esp_partition_t* update_partition = NULL;
-bool dfu_in_progress = false;
+// Devuelve el valor base64 para un caracter o -1 si es invalido.
+int base64_char_value(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1;
+}
 
+// Decodifica un string base64 en el buffer "out" (debe tener suficiente espacio).
+// Retorna la cantidad de bytes decodificados o -1 en caso de error.
+int base64_decode(const std::string &in, uint8_t *out, int out_max) {
+  int in_len = in.length();
+  int i = 0, j = 0;
+  int value;
+  uint32_t buffer = 0;
+  int bits_collected = 0;
+  while (i < in_len) {
+    char c = in[i++];
+    if (c == '=' || c == '\n' || c == '\r' || c == ' ') {
+      continue;
+    }
+    value = base64_char_value(c);
+    if (value < 0) {
+      // Caracter invalido
+      return -1;
+    }
+    buffer = (buffer << 6) | value;
+    bits_collected += 6;
+    if (bits_collected >= 8) {
+      bits_collected -= 8;
+      if (j >= out_max) return -1; // Salida insuficiente
+      out[j++] = (uint8_t)((buffer >> bits_collected) & 0xFF);
+    }
+  }
+  return j;
+}
+
+// -------------------------
+// Función para dibujar el recuadro de alerta en la pantalla (para OTA)
+// -------------------------
+void dibujarAlertaOTA() {
+  u8g2.clearBuffer();
+  // Dibujar recuadro central
+  int rectX = 5, rectY = 20, rectW = 118, rectH = 40;
+  u8g2.drawFrame(rectX, rectY, rectW, rectH);
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  // Mensaje de alerta
+  u8g2.setCursor(rectX + 10, rectY + 15);
+  u8g2.print("Desea aceptar");
+  u8g2.setCursor(rectX + 10, rectY + 28);
+  u8g2.print("la actualizacion?");
+  
+  // Opciones
+  String opcionAceptar = "Aceptar";
+  String opcionCancelar = "Cancelar";
+  
+  // Resaltar la opción seleccionada
+  if (otaConfirmationOption == 0) {
+    u8g2.drawBox(rectX + 10, rectY + 32, u8g2.getStrWidth(opcionAceptar.c_str())+2, 10);
+    u8g2.setDrawColor(0); // Texto en blanco sobre fondo negro
+    u8g2.setCursor(rectX + 11, rectY + 41);
+    u8g2.print(opcionAceptar);
+    u8g2.setDrawColor(1);
+    u8g2.setCursor(rectX + 60, rectY + 41);
+    u8g2.print(opcionCancelar);
+  } else {
+    u8g2.drawBox(rectX + 60, rectY + 32, u8g2.getStrWidth(opcionCancelar.c_str())+2, 10);
+    u8g2.setDrawColor(0);
+    u8g2.setCursor(rectX + 60, rectY + 41);
+    u8g2.print(opcionCancelar);
+    u8g2.setDrawColor(1);
+    u8g2.setCursor(rectX + 10, rectY + 41);
+    u8g2.print(opcionAceptar);
+  }
+  
+  u8g2.sendBuffer();
+}
+
+// -------------------------
+// Función para finalizar la OTA (al aceptar la actualización)
+// -------------------------
+void finalizarOTA() {
+  // Verificar la integridad antes de finalizar la OTA
+  if (!verificarIntegridadFirmware()) {
+    Serial.println("Verificacion de integridad fallida, abortando OTA.");
+    esp_ota_abort(ota_handle);
+    dfu_in_progress = false;
+  } else {
+    esp_err_t err = esp_ota_end(ota_handle);
+    if (err != ESP_OK) {
+      Serial.println("esp_ota_end fallo");
+      return;
+    }
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+      Serial.println("esp_ota_set_boot_partition fallo");
+    } else {
+      Serial.println("Actualizacion OTA exitosa, reiniciando...");
+      esp_restart();
+    }
+  }
+  otaConfirmationPending = false;
+}
+
+// -------------------------
+// Función para cancelar la OTA
+// -------------------------
+void cancelarOTA() {
+  Serial.println("Actualizacion OTA cancelada por el usuario.");
+  esp_ota_abort(ota_handle);
+  dfu_in_progress = false;
+  otaConfirmationPending = false;
+}
+
+// -------------------------
+// Clase para DFU OTA vía BLE con validación, alerta y decodificacion Base64
+// -------------------------
 class MyDFUCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *pCharacteristic) {
     std::string value = pCharacteristic->getValue();
@@ -126,43 +309,60 @@ class MyDFUCallbacks : public NimBLECharacteristicCallbacks {
       if (!dfu_in_progress) {
         update_partition = esp_ota_get_next_update_partition(NULL);
         if (update_partition == NULL) {
-          Serial.println("No hay partición OTA disponible");
+          Serial.println("No hay particion OTA disponible");
           return;
         }
         esp_err_t err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
         if (err != ESP_OK) {
-          Serial.println("esp_ota_begin falló");
+          Serial.println("esp_ota_begin fallo");
           return;
         }
+        // Reiniciar el cálculo del checksum para la nueva OTA
+        mbedtls_sha256_free(&sha256_ctx);
+        checksum_inicializado = false;
         dfu_in_progress = true;
-        Serial.println("Actualización DFU iniciada");
+        Serial.println("Actualizacion DFU iniciada");
       }
-      if (value == "EOF") {
-        esp_err_t err = esp_ota_end(ota_handle);
-        if (err != ESP_OK) {
-          Serial.println("esp_ota_end falló");
-        } else {
-          err = esp_ota_set_boot_partition(update_partition);
-          if (err != ESP_OK) {
-            Serial.println("esp_ota_set_boot_partition falló");
-          } else {
-            Serial.println("Actualización OTA exitosa, reiniciando...");
-            esp_restart();
-          }
-        }
+      // Si se recibe una firma digital (por ejemplo, con prefijo "SIG:")
+      if (value.substr(0, 4) == "SIG:") {
+         almacenarFirmaDigital(value.substr(4));
+         Serial.println("Firma digital recibida.");
+      }
+      // Fin de la transmisión OTA
+      else if (value == "EOF") {
+        // En lugar de finalizar inmediatamente, activar alerta para confirmar actualización
+        otaConfirmationPending = true;
+        Serial.println("Esperando confirmacion del usuario para aplicar la actualizacion OTA.");
       } else {
-        esp_err_t err = esp_ota_write(ota_handle, value.data(), value.size());
+        // Decodificar el string base64 a datos binarios
+        int encodedLength = value.size();
+        // El tamaño máximo decodificado es aproximadamente (encodedLength*3)/4
+        int maxDecodedSize = (encodedLength * 3) / 4;
+        uint8_t *decodedBuffer = new uint8_t[maxDecodedSize];
+        int decodedLength = base64_decode(value, decodedBuffer, maxDecodedSize);
+        if (decodedLength < 0) {
+          Serial.println("Error decodificando base64");
+          delete[] decodedBuffer;
+          return;
+        }
+        // Actualizar el checksum con los datos decodificados
+        actualizarChecksum(decodedBuffer, decodedLength);
+        esp_err_t err = esp_ota_write(ota_handle, decodedBuffer, decodedLength);
+        delete[] decodedBuffer;
         if (err != ESP_OK) {
-          Serial.println("esp_ota_write falló");
+          Serial.println("esp_ota_write fallo");
         } else {
-          Serial.print("Chunk recibido, tamaño: ");
-          Serial.println(value.size());
+          Serial.print("Chunk recibido (decodificado), tamano: ");
+          Serial.println(decodedLength);
         }
       }
     }
   }
 };
 
+// -------------------------
+// Configuracion de DFU y BLE
+// -------------------------
 void setupDFU() {
   NimBLEServer* pServer = NimBLEDevice::getServer();
   if (!pServer) {
@@ -180,9 +380,6 @@ void setupDFU() {
   Serial.println("Servicio DFU iniciado");
 }
 
-// -------------------------
-// Configurar BLE (servicio principal y DFU)
-// -------------------------
 void setupBLE() {
   Serial.println("Inicializando BLE...");
   NimBLEDevice::init("");
@@ -195,7 +392,7 @@ void setupBLE() {
       CHARACTERISTIC_UUID,
       NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
   );
-  Serial.println("Característica principal BLE creada");
+  Serial.println("Caracteristica principal BLE creada");
   pService->start();
   Serial.println("Servicio principal BLE iniciado");
   setupDFU();
@@ -211,7 +408,6 @@ void setupBLE() {
   Serial.println("BLE advertising iniciado");
 }
 
-// Función para apagar/encender BLE mediante publicidad
 void toggleBLE() {
   bleActivo = !bleActivo;
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
@@ -225,35 +421,70 @@ void toggleBLE() {
 }
 
 // -------------------------
+// Función para mostrar la cuenta regresiva de 5 segundos
+// -------------------------
+void mostrarCuentaRegresiva() {
+  if (startupStartTime == 0) {
+    startupStartTime = millis();
+  }
+  unsigned long elapsed = millis() - startupStartTime;
+  int secondsLeft = 5 - (elapsed / 1000);
+  if (secondsLeft < 0) secondsLeft = 0;
+  
+  u8g2.clearBuffer();
+  // Usamos una fuente grande para el número (puedes ajustar según prefieras)
+  u8g2.setFont(u8g2_font_fub30_tr);
+  String cuenta = String(secondsLeft);
+  uint16_t strWidth = u8g2.getStrWidth(cuenta.c_str());
+  int xPos = (128 - strWidth) / 2;
+  int yPos = 40;
+  u8g2.setCursor(xPos, yPos);
+  u8g2.print(cuenta);
+  
+  // Mensaje adicional
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  u8g2.setCursor(10, 60);
+  u8g2.print("Calibrando...");
+  
+  u8g2.sendBuffer();
+  
+  if (elapsed >= startupCountdownTime) {
+    startupDone = true;
+  }
+  delay(100);
+}
+
+// -------------------------
 // SETUP
 // -------------------------
 void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("Setup iniciado");
-
+  
   Wire.begin(SDA_PIN, SCL_PIN);
   setupBLE();
-
+  
   u8g2.begin();
+  u8g2.sendF("c", 0xA7);  
   u8g2.setPowerSave(false);
   u8g2.setContrast(brilloPantalla);
-
+  
   if (!bmp.begin_I2C(BMP_ADDR)) {
     Serial.println("¡Sensor BMP390L no encontrado!");
     while (1);
   }
   bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
-  bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
-  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
-
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_8X);
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_7);
+  
   pinMode(BUTTON_ALTITUDE, INPUT_PULLUP);
   pinMode(BUTTON_OLED, INPUT_PULLUP);
   pinMode(BUTTON_MENU, INPUT_PULLUP);
-
+  
   adc1_config_width(ADC_WIDTH_BIT_12);
   adc1_config_channel_atten(ADC1_CHANNEL_1, ADC_ATTEN_DB_12);
-
+  
   Serial.println("Setup completado");
 }
 
@@ -261,34 +492,66 @@ void setup() {
 // LOOP
 // -------------------------
 void loop() {
+  // Mostrar cuenta regresiva de estabilizacion al inicio
+  if (!startupDone) {
+    mostrarCuentaRegresiva();
+    return;
+  }
+  
+  // Si hay una alerta pendiente de confirmacion OTA, la mostramos y gestionamos sus botones
+  if (otaConfirmationPending) {
+    dibujarAlertaOTA();
+    // Boton para alternar la opcion (utilizamos BUTTON_ALTITUDE)
+    if (digitalRead(BUTTON_ALTITUDE) == LOW) {
+      otaConfirmationOption = (otaConfirmationOption + 1) % 2; // 0 o 1
+      delay(200);
+    }
+    // Boton para confirmar la seleccion (utilizamos BUTTON_OLED)
+    if (digitalRead(BUTTON_OLED) == LOW) {
+      if (otaConfirmationOption == 0) {
+        // Usuario acepta la actualizacion OTA
+        Serial.println("Usuario acepto la actualizacion OTA.");
+        finalizarOTA();
+      } else {
+        // Usuario cancela la actualizacion OTA
+        Serial.println("Usuario cancelo la actualizacion OTA.");
+        cancelarOTA();
+      }
+      delay(200);
+    }
+    // Evitar procesar el resto del loop mientras se muestra la alerta
+    return;
+  }
+  
+  // Proceso normal del loop
   bool sensorOk = bmp.performReading();
   float altitudActual = sensorOk ? bmp.readAltitude(1013.25) : 0;
-
-  // Gestión de botones
+  
+  // Gestion de botones para el menu normal
   if (digitalRead(BUTTON_MENU) == LOW) {
     menuActivo = !menuActivo;
     if (menuActivo) {
       menuOpcion = 0;
       batteryMenuActive = false;
       menuStartTime = millis();
-      Serial.println("Menú abierto.");
+      Serial.println("Menu abierto.");
     } else {
-      Serial.println("Menú cerrado.");
+      Serial.println("Menu cerrado.");
     }
     delay(50);
   }
-
+  
   if (digitalRead(BUTTON_ALTITUDE) == LOW) {
     if (menuActivo) {
-      menuOpcion = (menuOpcion + 1) % 5; // 5 opciones: 0..4
+      menuOpcion = (menuOpcion + 1) % 5;
       if (menuOpcion != 3) batteryMenuActive = false;
       menuStartTime = millis();
-      Serial.print("Opción del menú cambiada a: ");
+      Serial.print("Opcion del menu cambiada a: ");
       switch (menuOpcion) {
         case 0: Serial.println("Unidad"); break;
         case 1: Serial.println("Brillo"); break;
         case 2: Serial.println("Formato Altura"); break;
-        case 3: Serial.println("Batería"); break;
+        case 3: Serial.println("Bateria"); break;
         case 4: Serial.println("BL"); break;
       }
     } else {
@@ -297,7 +560,7 @@ void loop() {
     }
     delay(50);
   }
-
+  
   if (digitalRead(BUTTON_OLED) == LOW) {
     if (menuActivo) {
       switch (menuOpcion) {
@@ -325,12 +588,12 @@ void loop() {
           break;
         case 3:
           batteryMenuActive = !batteryMenuActive;
-          Serial.print("Vista Batería en menú: ");
+          Serial.print("Vista Bateria en menu: ");
           Serial.println(batteryMenuActive ? "ON" : "OFF");
           break;
         case 4:
           toggleBLE();
-          Serial.print("BLE ahora está: ");
+          Serial.print("BLE ahora esta: ");
           Serial.println(bleActivo ? "ON" : "OFF");
           break;
       }
@@ -348,23 +611,23 @@ void loop() {
     }
     delay(50);
   }
-
+  
   if (menuActivo && (millis() - menuStartTime > 7000)) {
     menuActivo = false;
     batteryMenuActive = false;
-    Serial.println("Menú cerrado por timeout.");
+    Serial.println("Menu cerrado por timeout.");
   }
-
+  
   updateBatteryReading();
-
-  // Visualización y envío vía BLE
+  
+  // Visualizacion y envio via BLE
   if (menuActivo) {
     if (batteryMenuActive) {
       if (pantallaEncendida) {
         int lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);
         float voltajeADC = (lecturaADC / 4095.0) * 2.6;
         float v_adc = voltajeADC;
-        float v_bat = v_adc * 2.0; // Sin factor de corrección
+        float v_bat = v_adc * 2.0;
         u8g2.clearBuffer();
         u8g2.setFont(u8g2_font_ncenB08_tr);
         u8g2.setCursor(0,12);
@@ -422,7 +685,6 @@ void loop() {
         else
           u8g2.print("  Bateria");
   
-        // Mostrar opción BLE en la misma línea, a la derecha:
         u8g2.setCursor(60,60);
         if (menuOpcion == 4)
           u8g2.print("> BL: " + String(bleActivo ? "ON" : "OFF"));
@@ -447,7 +709,7 @@ void loop() {
     int lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);
     float voltajeADC = (lecturaADC / 4095.0) * 2.6;
     float v_adc = voltajeADC;
-    float v_bat = v_adc * 2.0; // Sin factor de corrección
+    float v_bat = v_adc * 2.0;
     int porcentajeBateria = cachedBatteryPercentage;
   
     pCharacteristic->setValue(altDisplay.c_str());
@@ -455,12 +717,10 @@ void loop() {
   
     if (pantallaEncendida) {
       u8g2.clearBuffer();
-      // Imprimir unidad en la esquina superior izquierda
       u8g2.setFont(u8g2_font_ncenB08_tr);
       u8g2.setCursor(2,12);
       u8g2.print(unidadMetros ? "M" : "FT");
       
-      // Agregar estatus BLE centrado en la parte superior:
       u8g2.setFont(u8g2_font_ncenB08_tr);
       String bleStr = "BL: " + String(bleActivo ? "ON" : "OFF");
       uint16_t bleWidth = u8g2.getStrWidth(bleStr.c_str());
@@ -468,37 +728,35 @@ void loop() {
       u8g2.setCursor(xPosBle,12);
       u8g2.print(bleStr);
       
-      // Mostrar porcentaje de batería en la esquina superior derecha
       u8g2.setFont(u8g2_font_ncenB08_tr);
       String batStr = String(porcentajeBateria) + "%";
       uint16_t batWidth = u8g2.getStrWidth(batStr.c_str());
       u8g2.setCursor(128 - batWidth - 2,12);
       u8g2.print(batStr);
       
-      // Altitud grande centrada con fuente fub25
       u8g2.setFont(u8g2_font_fub30_tr);
       uint16_t yPosAlt = 50;
-      String altStr = "13000"; // Para altitud real, usar altDisplay
+      String altStr = altDisplay;
       uint16_t altWidth = u8g2.getStrWidth(altStr.c_str());
       int16_t xPosAlt = (128 - altWidth) / 2;
       if (xPosAlt < 0) xPosAlt = 0;
       u8g2.setCursor(xPosAlt, yPosAlt);
       u8g2.print(altStr);
-      u8g2.drawHLine(0, 15, 128);  // Primera barra horizontal en y = 20
+      u8g2.drawHLine(0, 15, 128);
       u8g2.drawHLine(0, 52, 128); 
+      u8g2.drawHLine(0, 0, 128);
+      u8g2.drawHLine(0, 63, 128); 
       u8g2.drawVLine(0, 0, 64);
-      u8g2.drawVLine(125, 0, 64);
-
-
+      u8g2.drawVLine(127, 0, 64);
       
       u8g2.setFont(u8g2_font_ncenB08_tr);
-      String user = "elDani"; // Para altitud real, usar altDisplay
+      String user = "elDani";
       uint16_t UserWidth = u8g2.getStrWidth(user.c_str());
       int16_t xPosUser = (128 - UserWidth) / 2;
-      if (xPosAlt < 0) xPosAlt = 0;
-      u8g2.setCursor(xPosUser, 64);
+      if (xPosUser < 0) xPosUser = 0;
+      u8g2.setCursor(xPosUser, 62);
       u8g2.print(user);
-
+  
       u8g2.sendBuffer();
     }
   }
