@@ -1,104 +1,195 @@
-// App.js
-import React, { useEffect, useState } from 'react';
-import { View, Text, Button, Platform, PermissionsAndroid } from 'react-native';
-import { BleManager } from 'react-native-ble-plx';
-// Para decodificar el valor base64
+import React, { useState } from 'react';
+import { View, Text, Button, Alert, StyleSheet, ActivityIndicator } from 'react-native';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system';
 import { Buffer } from 'buffer';
+import { BleManager } from 'react-native-ble-plx';
+
+// UUIDs del servicio y característica DFU en el ESP32
+const DFU_SERVICE_UUID = "e3c0f200-3b0b-4253-9f53-3a351d8a146e";
+const DFU_CHARACTERISTIC_UUID = "e3c0f201-3b0b-4253-9f53-3a351d8a146e";
+
+// Nombre del dispositivo en modo DFU (ajusta según tu caso)
+const TARGET_DEVICE_NAME = "ESP32-Altimetro-ota";
 
 export default function App() {
   const [bleManager] = useState(new BleManager());
-  const [altitude, setAltitude] = useState('---');
+  const [updating, setUpdating] = useState(false);
+  const [progress, setProgress] = useState(0);
 
-  useEffect(() => {
-    // Al montar el componente, pedimos permisos en Android 12+
-    requestPermissions();
-  }, []);
-
-  const requestPermissions = async () => {
-    if (Platform.OS === 'android') {
-      // Android 12+ pide BLUETOOTH_SCAN y BLUETOOTH_CONNECT
-      const scanGranted = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-        {
-          title: 'Permiso para escanear Bluetooth',
-          message: 'Necesitamos acceder al escaneo BLE para encontrar tu altímetro.',
-          buttonPositive: 'OK',
-        }
-      );
-      const connectGranted = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-        {
-          title: 'Permiso para conectar Bluetooth',
-          message: 'Necesitamos conectar a tu altímetro para leer los datos.',
-          buttonPositive: 'OK',
-        }
-      );
-      // Podrías chequear si fueron concedidos o no:
-      if (scanGranted !== PermissionsAndroid.RESULTS.GRANTED ||
-          connectGranted !== PermissionsAndroid.RESULTS.GRANTED) {
-        console.log('Permisos BLE denegados');
+  /**
+   * Selecciona un archivo usando DocumentPicker.
+   * Se configura el tipo como ANY para permitir la selección de cualquier archivo,
+   * incluyendo archivos binarios (.bin). Se usa copyToCacheDirectory: true para asegurar su lectura.
+   */
+  const pickFirmwareFile = async (): Promise<string | null> => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "*/*",
+        copyToCacheDirectory: true,
+      });
+      console.log("Resultado DocumentPicker:", result);
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        return result.assets[0].uri;
+      } else {
+        return null;
       }
+    } catch (error: any) {
+      Alert.alert("Error", "No se pudo seleccionar el archivo: " + error.message);
+      return null;
     }
   };
 
-  const startScan = () => {
-    // Iniciamos el escaneo de dispositivos
-    bleManager.startDeviceScan(null, null, (error, device) => {
-      if (error) {
-        console.warn('Error escaneando BLE:', error);
-        return;
-      }
+  /**
+   * Lee el archivo en base64 y lo convierte a un Buffer.
+   */
+  const readFirmwareFile = async (uri: string): Promise<Buffer> => {
+    try {
+      const base64Data = await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      return Buffer.from(base64Data, 'base64');
+    } catch (error: any) {
+      throw new Error("Error leyendo el archivo: " + error.message);
+    }
+  };
 
-      // Verificamos si es nuestro ESP32 por nombre (puedes filtrar por MAC, etc.)
-      if (device?.name === 'ESP32-Altimetro') {
-        console.log('Encontrado:', device.name);
+  /**
+   * Divide el Buffer en chunks de un tamaño dado.
+   */
+  const chunkFirmware = (buffer: Buffer, chunkSize: number): Buffer[] => {
+    const chunks: Buffer[] = [];
+    for (let i = 0; i < buffer.length; i += chunkSize) {
+      chunks.push(buffer.slice(i, i + chunkSize));
+    }
+    return chunks;
+  };
 
-        // Detenemos el escaneo
+  /**
+   * Escanea y conecta al dispositivo que contenga en su nombre TARGET_DEVICE_NAME.
+   */
+  const connectToDeviceForDFU = async (): Promise<any> => {
+    return new Promise<any>((resolve, reject) => {
+      console.log("Iniciando escaneo BLE...");
+      bleManager.startDeviceScan(null, null, (error, device) => {
+        if (error) {
+          bleManager.stopDeviceScan();
+          reject(error);
+          return;
+        }
+        if (device && device.name && device.name.includes(TARGET_DEVICE_NAME)) {
+          console.log("Dispositivo DFU encontrado:", device.name, device.id);
+          bleManager.stopDeviceScan();
+          device.connect()
+            .then((connectedDevice) => connectedDevice.discoverAllServicesAndCharacteristics())
+            .then((connectedDevice) => resolve(connectedDevice))
+            .catch((err) => reject(err));
+        }
+      });
+      setTimeout(() => {
         bleManager.stopDeviceScan();
-
-        // Nos conectamos al dispositivo
-        device
-          .connect()
-          .then((connectedDevice) => {
-            console.log('Conectado a:', connectedDevice.name);
-            // Descubrir servicios y características
-            return connectedDevice.discoverAllServicesAndCharacteristics();
-          })
-          .then((connectedDevice) => {
-            // Ahora nos suscribimos a la característica que notifica la altitud
-            connectedDevice.monitorCharacteristicForService(
-              '4fafc201-1fb5-459e-8fcc-c5c9c331914b', // SERVICE_UUID
-              'beb5483e-36e1-4688-b7f5-ea07361b26a8', // CHARACTERISTIC_UUID
-              (error, characteristic) => {
-                if (error) {
-                  console.warn('Error al monitorizar característica:', error);
-                  return;
-                }
-                // characteristic.value viene en base64
-                const base64Value = characteristic?.value;
-                if (base64Value) {
-                  // Decodificar a string ASCII
-                  const ascii = Buffer.from(base64Value, 'base64').toString('ascii');
-                  console.log('Altitud recibida:', ascii);
-                  setAltitude(ascii); // Guardamos en el estado para mostrar en pantalla
-                }
-              }
-            );
-          })
-          .catch((err) => {
-            console.warn('Error conectando o descubriendo servicios:', err);
-          });
-      }
+        reject(new Error("Dispositivo DFU no encontrado en el tiempo esperado."));
+      }, 15000);
     });
   };
 
+  /**
+   * Envía cada chunk al servicio DFU y, al final, la cadena "EOF".
+   */
+  const sendFirmware = async (device: any, chunks: Buffer[]): Promise<void> => {
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const base64Chunk = chunk.toString('base64');
+      await device.writeCharacteristicWithResponseForService(
+        DFU_SERVICE_UUID,
+        DFU_CHARACTERISTIC_UUID,
+        base64Chunk
+      );
+      setProgress(Math.round(((i + 1) / chunks.length) * 100));
+    }
+    const eofBase64 = Buffer.from("EOF").toString('base64');
+    await device.writeCharacteristicWithResponseForService(
+      DFU_SERVICE_UUID,
+      DFU_CHARACTERISTIC_UUID,
+      eofBase64
+    );
+  };
+
+  /**
+   * Flujo principal de actualización de firmware.
+   * Incluye negociación de MTU para acelerar la transferencia.
+   */
+  const updateFirmware = async () => {
+    try {
+      setUpdating(true);
+      setProgress(0);
+      // 1. Seleccionar archivo
+      const fileUri = await pickFirmwareFile();
+      if (!fileUri) {
+        Alert.alert("Actualización", "No se seleccionó archivo de firmware");
+        setUpdating(false);
+        return;
+      }
+      // 2. Leer archivo y obtener buffer
+      const firmwareBuffer = await readFirmwareFile(fileUri);
+      console.log("Tamaño del firmware (bytes):", firmwareBuffer.length);
+      // 3. Conectar al dispositivo DFU
+      const dfuDevice = await connectToDeviceForDFU();
+      console.log("Conectado a dispositivo DFU:", dfuDevice.id);
+      // 4. Negociar un MTU mayor (por ejemplo, 247 bytes)
+      const mtuResult = await dfuDevice.requestMTU(247);
+      console.log("MTU negociado:", mtuResult);
+      // Extraer el MTU negociado (suponiendo que el objeto tiene la propiedad 'mtu')
+      const negotiatedMtu = mtuResult.mtu ? mtuResult.mtu : 247;
+      // Definir el tamaño del chunk basado en el MTU (restando 3 bytes de overhead)
+      const chunkSize = Math.min(200, negotiatedMtu - 3);
+      console.log("Tamaño del chunk:", chunkSize);
+      // 5. Dividir firmware en chunks
+      const chunks = chunkFirmware(firmwareBuffer, chunkSize);
+      console.log("Número de chunks:", chunks.length);
+      // 6. Enviar firmware por BLE
+      await sendFirmware(dfuDevice, chunks);
+      Alert.alert("Actualización completada", "El dispositivo se reiniciará con el nuevo firmware.");
+      setUpdating(false);
+    } catch (error: any) {
+      console.error("Error en actualización DFU:", error);
+      Alert.alert("Error en actualización", error.message);
+      setUpdating(false);
+    }
+  };
+
   return (
-    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-      <Text style={{ fontSize: 20, marginBottom: 10 }}>Altímetro BLE</Text>
-      <Button title="Escanear y Conectar" onPress={startScan} />
-      <Text style={{ marginTop: 20 }}>
-        Altitud: {altitude}
-      </Text>
+    <View style={styles.container}>
+      <Text style={styles.title}>Actualización de Firmware</Text>
+      {updating ? (
+        <View style={styles.progressContainer}>
+          <ActivityIndicator size="large" color="#007AFF" />
+          <Text style={styles.progressText}>Progreso: {progress}%</Text>
+        </View>
+      ) : (
+        <Button title="Actualizar Firmware" onPress={updateFirmware} />
+      )}
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    padding: 20,
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+  },
+  title: {
+    fontSize: 22,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  progressContainer: {
+    alignItems: 'center',
+  },
+  progressText: {
+    marginTop: 10,
+    fontSize: 18,
+  },
+});
