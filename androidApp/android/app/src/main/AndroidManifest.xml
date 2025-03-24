@@ -4,6 +4,17 @@
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
   <uses-permission android:name="android.permission.VIBRATE"/>
   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+    <!-- Permisos básicos para Bluetooth -->
+  <uses-permission android:name="android.permission.BLUETOOTH" />
+  <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+  
+  <!-- Permisos para el acceso a la ubicación (necesarios para escaneo BLE) -->
+  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+  
+  <!-- Para Android 12 y versiones superiores -->
+  <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+  <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+  <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
   <queries>
     <intent>
       <action android:name="android.intent.action.VIEW"/>

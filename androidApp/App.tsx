@@ -1,178 +1,298 @@
-import React, { useState } from 'react';
-import { View, Text, Button, Alert, StyleSheet, ActivityIndicator } from 'react-native';
-import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system';
-import { Buffer } from 'buffer';
+import React, { useState, useEffect } from 'react';
+import { 
+  View, 
+  Text, 
+  Button, 
+  FlatList, 
+  TouchableOpacity, 
+  StyleSheet, 
+  ActivityIndicator, 
+  Alert,
+  PermissionsAndroid,
+  Platform
+} from 'react-native';
 import { BleManager } from 'react-native-ble-plx';
-
-// UUIDs del servicio y característica DFU en el ESP32
-const DFU_SERVICE_UUID = "e3c0f200-3b0b-4253-9f53-3a351d8a146e";
-const DFU_CHARACTERISTIC_UUID = "e3c0f201-3b0b-4253-9f53-3a351d8a146e";
-// Nombre del dispositivo en modo DFU
-const TARGET_DEVICE_NAME = "ESP32-Altimetro-ota";
+import UpdateUsername from './UpdateUsername';
+import FirmwareUpdate from './FirmwareUpdate';
 
 export default function App() {
   const [bleManager] = useState(new BleManager());
-  const [updating, setUpdating] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [scanning, setScanning] = useState(false);
+  const [devices, setDevices] = useState([]);
+  const [connectedDevice, setConnectedDevice] = useState(null);
+  const [connecting, setConnecting] = useState(false);
+  const [deviceServices, setDeviceServices] = useState([]); // Estado para servicios y características
+  const [screen, setScreen] = useState('main'); // "main", "updateUser" o "firmwareUpdate"
 
-  // Función para seleccionar el archivo de firmware.
-  const pickFirmwareFile = async (): Promise<string | null> => {
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: "*/*",
-        copyToCacheDirectory: true,
-      });
-      console.log("Resultado DocumentPicker:", result);
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        return result.assets[0].uri;
-      } else {
-        return null;
+  // Solicitar permisos en tiempo de ejecución para Android
+  const requestPermissions = async () => {
+    if (Platform.OS === 'android') {
+      try {
+        const granted = await PermissionsAndroid.requestMultiple([
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+        ]);
+        console.log('Permisos solicitados:', granted);
+      } catch (error) {
+        console.warn('Error solicitando permisos:', error);
       }
-    } catch (error: any) {
-      Alert.alert("Error", "No se pudo seleccionar el archivo: " + error.message);
-      return null;
     }
   };
 
-  // Función para leer el archivo en base64 y convertirlo a un Buffer.
-  const readFirmwareFile = async (uri: string): Promise<Buffer> => {
-    try {
-      const base64Data = await FileSystem.readAsStringAsync(uri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-      return Buffer.from(base64Data, 'base64');
-    } catch (error: any) {
-      throw new Error("Error leyendo el archivo: " + error.message);
-    }
-  };
+  useEffect(() => {
+    requestPermissions();
+    return () => {
+      bleManager.destroy();
+    };
+  }, [bleManager]);
 
-  // Divide el Buffer en chunks de un tamaño dado.
-  const chunkFirmware = (buffer: Buffer, chunkSize: number): Buffer[] => {
-    const chunks: Buffer[] = [];
-    for (let i = 0; i < buffer.length; i += chunkSize) {
-      chunks.push(buffer.slice(i, i + chunkSize));
-    }
-    return chunks;
-  };
-
-  // Escanea y conecta al dispositivo cuyo nombre contenga TARGET_DEVICE_NAME.
-  const connectToDeviceForDFU = async (): Promise<any> => {
-    return new Promise<any>((resolve, reject) => {
-      console.log("Iniciando escaneo BLE...");
-      bleManager.startDeviceScan(null, null, (error, device) => {
-        if (error) {
-          bleManager.stopDeviceScan();
-          reject(error);
-          return;
+  // Cuando se conecte un dispositivo, consulta sus servicios y características
+  useEffect(() => {
+    const fetchServices = async () => {
+      if (connectedDevice) {
+        try {
+          const services = await connectedDevice.services();
+          const servicesData = [];
+          for (const service of services) {
+            const characteristics = await service.characteristics();
+            servicesData.push({
+              serviceUUID: service.uuid,
+              characteristics: characteristics.map(char => char.uuid),
+            });
+          }
+          setDeviceServices(servicesData);
+          console.log("Servicios obtenidos:", servicesData);
+        } catch (err) {
+          console.error("Error obteniendo servicios:", err);
         }
-        if (device && device.name && device.name.includes(TARGET_DEVICE_NAME)) {
-          console.log("Dispositivo DFU encontrado:", device.name, device.id);
-          bleManager.stopDeviceScan();
-          device.connect()
-            .then((connectedDevice) => connectedDevice.discoverAllServicesAndCharacteristics())
-            .then((connectedDevice) => resolve(connectedDevice))
-            .catch((err) => reject(err));
-        }
-      });
-      setTimeout(() => {
-        bleManager.stopDeviceScan();
-        reject(new Error("Dispositivo DFU no encontrado en el tiempo esperado."));
-      }, 15000);
+      } else {
+        setDeviceServices([]);
+      }
+    };
+    fetchServices();
+  }, [connectedDevice]);
+
+  // Función para escanear dispositivos BLE
+  const scanForDevices = () => {
+    setDevices([]); // Limpiar lista anterior
+    setScanning(true);
+    console.log("Iniciando escaneo...");
+    bleManager.startDeviceScan(null, null, (error, device) => {
+      if (error) {
+        console.log("Error escaneando:", error);
+        setScanning(false);
+        return;
+      }
+      // Mostrar log de cada dispositivo detectado
+      console.log("Dispositivo detectado:", device?.name || device?.localName, device?.id);
+      if (device && (device.name || device.localName)) {
+        setDevices(prevDevices => {
+          const exists = prevDevices.some(d => d.id === device.id);
+          if (!exists) {
+            return [...prevDevices, device];
+          }
+          return prevDevices;
+        });
+      }
     });
+    setTimeout(() => {
+      bleManager.stopDeviceScan();
+      setScanning(false);
+      console.log("Escaneo detenido");
+    }, 10000);
   };
 
-  // Envía cada chunk al servicio DFU y, al final, la cadena "EOF".
-  const sendFirmware = async (device: any, chunks: Buffer[]): Promise<void> => {
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const base64Chunk = chunk.toString('base64');
-      await device.writeCharacteristicWithResponseForService(
-        DFU_SERVICE_UUID,
-        DFU_CHARACTERISTIC_UUID,
-        base64Chunk
-      );
-      setProgress(Math.round(((i + 1) / chunks.length) * 100));
+  // Función para conectar al dispositivo seleccionado
+  const connectToDevice = async (device) => {
+    try {
+      setConnecting(true);
+      console.log("Intentando conectar a:", device.name || device.localName, device.id);
+      const connected = await device.connect();
+      await connected.discoverAllServicesAndCharacteristics();
+      setConnectedDevice(connected);
+      setConnecting(false);
+      Alert.alert("Conectado", `Conectado a ${connected.name || connected.localName}`);
+    } catch (error) {
+      setConnecting(false);
+      console.log("Error al conectar:", error);
+      Alert.alert("Error", "No se pudo conectar al dispositivo");
     }
-    const eofBase64 = Buffer.from("EOF").toString('base64');
-    await device.writeCharacteristicWithResponseForService(
-      DFU_SERVICE_UUID,
-      DFU_CHARACTERISTIC_UUID,
-      eofBase64
+  };
+
+  // Función para desconectar
+  const disconnectDevice = async () => {
+    if (connectedDevice) {
+      try {
+        await connectedDevice.cancelConnection();
+        setConnectedDevice(null);
+      } catch (error) {
+        console.log("Error al desconectar:", error);
+      }
+    }
+  };
+
+  // Renderizado de los servicios y características
+  const renderServices = () => {
+    return (
+      <View style={styles.servicesContainer}>
+        <Text style={styles.servicesTitle}>Servicios y Características</Text>
+        {deviceServices.length === 0 ? (
+          <Text style={styles.noServices}>No se encontraron servicios.</Text>
+        ) : (
+          deviceServices.map((serviceData, index) => (
+            <View key={index} style={styles.serviceItem}>
+              <Text style={styles.serviceUUID}>Service: {serviceData.serviceUUID}</Text>
+              {serviceData.characteristics.map((charUUID, idx) => (
+                <Text key={idx} style={styles.charUUID}>Characteristic: {charUUID}</Text>
+              ))}
+            </View>
+          ))
+        )}
+      </View>
     );
   };
 
-  // Flujo principal de actualización de firmware, que incluye negociación de MTU.
-  const updateFirmware = async () => {
-    try {
-      setUpdating(true);
-      setProgress(0);
-      const fileUri = await pickFirmwareFile();
-      if (!fileUri) {
-        Alert.alert("Actualización", "No se seleccionó archivo de firmware");
-        setUpdating(false);
-        return;
-      }
-      const firmwareBuffer = await readFirmwareFile(fileUri);
-      console.log("Tamaño del firmware (bytes):", firmwareBuffer.length);
-      const dfuDevice = await connectToDeviceForDFU();
-      console.log("Conectado a dispositivo DFU:", dfuDevice.id);
-      const mtuResult = await dfuDevice.requestMTU(247);
-      console.log("MTU negociado:", mtuResult);
-      const negotiatedMtu = mtuResult.mtu ? mtuResult.mtu : 247;
-      const chunkSize = Math.min(200, negotiatedMtu - 3);
-      console.log("Tamaño del chunk:", chunkSize);
-      const chunks = chunkFirmware(firmwareBuffer, chunkSize);
-      console.log("Número de chunks:", chunks.length);
-      await sendFirmware(dfuDevice, chunks);
-      Alert.alert("Actualización completada", "El dispositivo se reiniciará con el nuevo firmware.");
-      setUpdating(false);
-    } catch (error: any) {
-      console.error("Error en actualización DFU:", error);
-      Alert.alert("Error en actualización", error.message);
-      setUpdating(false);
+  // Pantalla principal: muestra estado de conexión, lista de dispositivos y botones de navegación
+  const renderMainScreen = () => (
+    <View style={styles.container}>
+      <Text style={styles.status}>
+        {connectedDevice ? `Conectado: ${connectedDevice.name || connectedDevice.localName}` : "Desconectado"}
+      </Text>
+      {!connectedDevice && (
+        <View style={styles.scanContainer}>
+          <Button 
+            title="Escanear Dispositivos" 
+            onPress={scanForDevices} 
+            disabled={scanning || connecting} 
+          />
+          {(scanning || connecting) && (
+            <ActivityIndicator 
+              size="large" 
+              color="#007AFF" 
+              style={styles.loading} 
+            />
+          )}
+          <FlatList
+            data={devices}
+            keyExtractor={(item) => item.id}
+            renderItem={({ item }) => (
+              <TouchableOpacity 
+                style={styles.deviceItem} 
+                onPress={() => connectToDevice(item)}
+                disabled={connecting}
+              >
+                <Text>{item.name || item.localName}</Text>
+                <Text style={styles.deviceId}>{item.id}</Text>
+              </TouchableOpacity>
+            )}
+            ListEmptyComponent={() => (
+              <Text style={styles.noDevices}>No se encontraron dispositivos</Text>
+            )}
+          />
+        </View>
+      )}
+      {connectedDevice && (
+        <View style={styles.buttonsContainer}>
+          <Button 
+            title="Actualizar Usuario" 
+            onPress={() => setScreen('updateUser')}
+            disabled={!connectedDevice || connecting}
+          />
+          <Button 
+            title="Actualizar Firmware" 
+            onPress={() => setScreen('firmwareUpdate')}
+            disabled={!connectedDevice || connecting}
+          />
+          <Button 
+            title="Desconectar" 
+            onPress={disconnectDevice}
+            disabled={connecting}
+          />
+        </View>
+      )}
+      {/* Mostrar información de servicios si hay dispositivo conectado */}
+      {connectedDevice && renderServices()}
+    </View>
+  );
+
+  // Renderizado según la pantalla seleccionada
+  const renderScreen = () => {
+    if (screen === 'main') {
+      return renderMainScreen();
+    } else if (screen === 'updateUser') {
+      return <UpdateUsername onBack={() => setScreen('main')} connectedDevice={connectedDevice} />;
+    } else if (screen === 'firmwareUpdate') {
+      return <FirmwareUpdate onBack={() => setScreen('main')} connectedDevice={connectedDevice} />;
     }
   };
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Actualización de Firmware</Text>
-      <Text style={styles.subtitle}>Hola Mundo</Text>
-      {updating ? (
-        <View style={styles.progressContainer}>
-          <ActivityIndicator size="large" color="#007AFF" />
-          <Text style={styles.progressText}>Progreso: {progress}%</Text>
-        </View>
-      ) : (
-        <Button title="Actualizar Firmware" onPress={updateFirmware} />
-      )}
+    <View style={styles.appContainer}>
+      {renderScreen()}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  appContainer: {
     flex: 1,
     padding: 20,
-    justifyContent: 'center',
     backgroundColor: '#fff',
   },
-  title: {
-    fontSize: 22,
-    textAlign: 'center',
-    marginBottom: 20,
+  container: {
+    flex: 1,
   },
-  subtitle: {
+  status: {
     fontSize: 18,
     textAlign: 'center',
-    marginBottom: 20,
-    color: '#555'
+    marginBottom: 10,
   },
-  progressContainer: {
-    alignItems: 'center',
+  scanContainer: {
+    flex: 1,
   },
-  progressText: {
-    marginTop: 10,
-    fontSize: 18,
+  loading: {
+    marginVertical: 10,
+  },
+  deviceItem: {
+    padding: 10,
+    borderBottomWidth: 1,
+    borderColor: '#ccc',
+  },
+  deviceId: {
+    fontSize: 12,
+    color: '#555',
+  },
+  noDevices: {
+    textAlign: 'center',
+    marginTop: 20,
+    color: '#999',
+  },
+  buttonsContainer: {
+    marginTop: 20,
+    justifyContent: 'space-around',
+    height: 150,
+  },
+  servicesContainer: {
+    marginTop: 20,
+    borderTopWidth: 1,
+    borderColor: '#ccc',
+    paddingTop: 10,
+  },
+  servicesTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  serviceItem: {
+    marginVertical: 5,
+  },
+  serviceUUID: {
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  charUUID: {
+    fontSize: 12,
+    marginLeft: 10,
   },
 });

@@ -1,5 +1,6 @@
 {
   "expo": {
+    "entryPoint": "./index.js",
     "name": "androidApp",
     "slug": "androidApp",
     "version": "1.0.0",
