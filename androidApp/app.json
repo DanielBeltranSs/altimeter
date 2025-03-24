@@ -25,16 +25,6 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    },
-    "plugins": [
-      [
-        "react-native-ble-plx",
-        {
-          "isBackgroundEnabled": false,
-          "modes": ["central"],
-          "bluetoothAlwaysPermission": "Permite que la app se conecte a dispositivos BLE en todo momento."
-        }
-      ]
-    ]
+    }
   }
 }

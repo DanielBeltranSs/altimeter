@@ -8,8 +8,7 @@ import { BleManager } from 'react-native-ble-plx';
 // UUIDs del servicio y característica DFU en el ESP32
 const DFU_SERVICE_UUID = "e3c0f200-3b0b-4253-9f53-3a351d8a146e";
 const DFU_CHARACTERISTIC_UUID = "e3c0f201-3b0b-4253-9f53-3a351d8a146e";
-
-// Nombre del dispositivo en modo DFU (ajusta según tu caso)
+// Nombre del dispositivo en modo DFU
 const TARGET_DEVICE_NAME = "ESP32-Altimetro-ota";
 
 export default function App() {
@@ -17,11 +16,7 @@ export default function App() {
   const [updating, setUpdating] = useState(false);
   const [progress, setProgress] = useState(0);
 
-  /**
-   * Selecciona un archivo usando DocumentPicker.
-   * Se configura el tipo como ANY para permitir la selección de cualquier archivo,
-   * incluyendo archivos binarios (.bin). Se usa copyToCacheDirectory: true para asegurar su lectura.
-   */
+  // Función para seleccionar el archivo de firmware.
   const pickFirmwareFile = async (): Promise<string | null> => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -40,9 +35,7 @@ export default function App() {
     }
   };
 
-  /**
-   * Lee el archivo en base64 y lo convierte a un Buffer.
-   */
+  // Función para leer el archivo en base64 y convertirlo a un Buffer.
   const readFirmwareFile = async (uri: string): Promise<Buffer> => {
     try {
       const base64Data = await FileSystem.readAsStringAsync(uri, {
@@ -54,9 +47,7 @@ export default function App() {
     }
   };
 
-  /**
-   * Divide el Buffer en chunks de un tamaño dado.
-   */
+  // Divide el Buffer en chunks de un tamaño dado.
   const chunkFirmware = (buffer: Buffer, chunkSize: number): Buffer[] => {
     const chunks: Buffer[] = [];
     for (let i = 0; i < buffer.length; i += chunkSize) {
@@ -65,9 +56,7 @@ export default function App() {
     return chunks;
   };
 
-  /**
-   * Escanea y conecta al dispositivo que contenga en su nombre TARGET_DEVICE_NAME.
-   */
+  // Escanea y conecta al dispositivo cuyo nombre contenga TARGET_DEVICE_NAME.
   const connectToDeviceForDFU = async (): Promise<any> => {
     return new Promise<any>((resolve, reject) => {
       console.log("Iniciando escaneo BLE...");
@@ -93,9 +82,7 @@ export default function App() {
     });
   };
 
-  /**
-   * Envía cada chunk al servicio DFU y, al final, la cadena "EOF".
-   */
+  // Envía cada chunk al servicio DFU y, al final, la cadena "EOF".
   const sendFirmware = async (device: any, chunks: Buffer[]): Promise<void> => {
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
@@ -115,39 +102,28 @@ export default function App() {
     );
   };
 
-  /**
-   * Flujo principal de actualización de firmware.
-   * Incluye negociación de MTU para acelerar la transferencia.
-   */
+  // Flujo principal de actualización de firmware, que incluye negociación de MTU.
   const updateFirmware = async () => {
     try {
       setUpdating(true);
       setProgress(0);
-      // 1. Seleccionar archivo
       const fileUri = await pickFirmwareFile();
       if (!fileUri) {
         Alert.alert("Actualización", "No se seleccionó archivo de firmware");
         setUpdating(false);
         return;
       }
-      // 2. Leer archivo y obtener buffer
       const firmwareBuffer = await readFirmwareFile(fileUri);
       console.log("Tamaño del firmware (bytes):", firmwareBuffer.length);
-      // 3. Conectar al dispositivo DFU
       const dfuDevice = await connectToDeviceForDFU();
       console.log("Conectado a dispositivo DFU:", dfuDevice.id);
-      // 4. Negociar un MTU mayor (por ejemplo, 247 bytes)
       const mtuResult = await dfuDevice.requestMTU(247);
       console.log("MTU negociado:", mtuResult);
-      // Extraer el MTU negociado (suponiendo que el objeto tiene la propiedad 'mtu')
       const negotiatedMtu = mtuResult.mtu ? mtuResult.mtu : 247;
-      // Definir el tamaño del chunk basado en el MTU (restando 3 bytes de overhead)
       const chunkSize = Math.min(200, negotiatedMtu - 3);
       console.log("Tamaño del chunk:", chunkSize);
-      // 5. Dividir firmware en chunks
       const chunks = chunkFirmware(firmwareBuffer, chunkSize);
       console.log("Número de chunks:", chunks.length);
-      // 6. Enviar firmware por BLE
       await sendFirmware(dfuDevice, chunks);
       Alert.alert("Actualización completada", "El dispositivo se reiniciará con el nuevo firmware.");
       setUpdating(false);
@@ -161,6 +137,7 @@ export default function App() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Actualización de Firmware</Text>
+      <Text style={styles.subtitle}>Hola Mundo</Text>
       {updating ? (
         <View style={styles.progressContainer}>
           <ActivityIndicator size="large" color="#007AFF" />
@@ -184,6 +161,12 @@ const styles = StyleSheet.create({
     fontSize: 22,
     textAlign: 'center',
     marginBottom: 20,
+  },
+  subtitle: {
+    fontSize: 18,
+    textAlign: 'center',
+    marginBottom: 20,
+    color: '#555'
   },
   progressContainer: {
     alignItems: 'center',
