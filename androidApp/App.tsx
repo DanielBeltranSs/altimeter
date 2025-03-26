@@ -21,10 +21,9 @@ export default function App() {
   const [devices, setDevices] = useState([]);
   const [connectedDevice, setConnectedDevice] = useState(null);
   const [connecting, setConnecting] = useState(false);
-  const [deviceServices, setDeviceServices] = useState([]); // Estado para servicios y características
-  const [screen, setScreen] = useState('main'); // "main", "updateUser" o "firmwareUpdate"
+  const [screen, setScreen] = useState('main'); // "main", "updateUser", "firmwareUpdate"
 
-  // Solicitar permisos en tiempo de ejecución para Android
+  // Solicitar permisos en Android
   const requestPermissions = async () => {
     if (Platform.OS === 'android') {
       try {
@@ -33,266 +32,116 @@ export default function App() {
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
         ]);
-        console.log('Permisos solicitados:', granted);
+        console.log('Permisos BLE:', granted);
       } catch (error) {
-        console.warn('Error solicitando permisos:', error);
+        console.warn('Error solicitando permisos BLE:', error);
       }
     }
   };
 
   useEffect(() => {
     requestPermissions();
-    return () => {
-      bleManager.destroy();
-    };
-  }, [bleManager]);
+    return () => bleManager.destroy();
+  }, []);
 
-  // Cuando se conecte un dispositivo, consulta sus servicios y características
-  useEffect(() => {
-    const fetchServices = async () => {
-      if (connectedDevice) {
-        try {
-          const services = await connectedDevice.services();
-          const servicesData = [];
-          for (const service of services) {
-            const characteristics = await service.characteristics();
-            servicesData.push({
-              serviceUUID: service.uuid,
-              characteristics: characteristics.map(char => char.uuid),
-            });
-          }
-          setDeviceServices(servicesData);
-          console.log("Servicios obtenidos:", servicesData);
-        } catch (err) {
-          console.error("Error obteniendo servicios:", err);
-        }
-      } else {
-        setDeviceServices([]);
-      }
-    };
-    fetchServices();
-  }, [connectedDevice]);
-
-  // Función para escanear dispositivos BLE
+  // Escanear dispositivos BLE
   const scanForDevices = () => {
-    setDevices([]); // Limpiar lista anterior
+    setDevices([]);
     setScanning(true);
-    console.log("Iniciando escaneo...");
+    console.log('Iniciando escaneo BLE...');
     bleManager.startDeviceScan(null, null, (error, device) => {
       if (error) {
-        console.log("Error escaneando:", error);
+        console.error('Error escaneando:', error);
         setScanning(false);
         return;
       }
-      // Mostrar log de cada dispositivo detectado
-      console.log("Dispositivo detectado:", device?.name || device?.localName, device?.id);
-      if (device && (device.name || device.localName)) {
-        setDevices(prevDevices => {
-          const exists = prevDevices.some(d => d.id === device.id);
-          if (!exists) {
-            return [...prevDevices, device];
-          }
-          return prevDevices;
-        });
+      const name = device?.name || device?.localName;
+      console.log('Dispositivo detectado:', name, device?.id);
+      if (device && name) {
+        setDevices(prev => prev.some(d => d.id === device.id) ? prev : [...prev, device]);
       }
     });
     setTimeout(() => {
       bleManager.stopDeviceScan();
       setScanning(false);
-      console.log("Escaneo detenido");
+      console.log('Escaneo detenido (timeout)');
     }, 10000);
   };
 
-  // Función para conectar al dispositivo seleccionado
+  // Conectar a dispositivo BLE
   const connectToDevice = async (device) => {
     try {
       setConnecting(true);
-      console.log("Intentando conectar a:", device.name || device.localName, device.id);
+      bleManager.stopDeviceScan();
+      setScanning(false);
+      console.log('Conectando a:', device.name || device.localName);
       const connected = await device.connect();
       await connected.discoverAllServicesAndCharacteristics();
       setConnectedDevice(connected);
-      setConnecting(false);
-      Alert.alert("Conectado", `Conectado a ${connected.name || connected.localName}`);
+      Alert.alert('Conectado', `Conectado a ${connected.name || connected.localName}`);
     } catch (error) {
+      console.error('Error al conectar:', error);
+      Alert.alert('Error', 'No se pudo conectar al dispositivo');
+    } finally {
       setConnecting(false);
-      console.log("Error al conectar:", error);
-      Alert.alert("Error", "No se pudo conectar al dispositivo");
     }
   };
 
-  // Función para desconectar
   const disconnectDevice = async () => {
     if (connectedDevice) {
-      try {
-        await connectedDevice.cancelConnection();
-        setConnectedDevice(null);
-      } catch (error) {
-        console.log("Error al desconectar:", error);
-      }
+      await connectedDevice.cancelConnection();
+      setConnectedDevice(null);
     }
   };
 
-  // Renderizado de los servicios y características
-  const renderServices = () => {
-    return (
-      <View style={styles.servicesContainer}>
-        <Text style={styles.servicesTitle}>Servicios y Características</Text>
-        {deviceServices.length === 0 ? (
-          <Text style={styles.noServices}>No se encontraron servicios.</Text>
-        ) : (
-          deviceServices.map((serviceData, index) => (
-            <View key={index} style={styles.serviceItem}>
-              <Text style={styles.serviceUUID}>Service: {serviceData.serviceUUID}</Text>
-              {serviceData.characteristics.map((charUUID, idx) => (
-                <Text key={idx} style={styles.charUUID}>Characteristic: {charUUID}</Text>
-              ))}
-            </View>
-          ))
-        )}
-      </View>
-    );
-  };
-
-  // Pantalla principal: muestra estado de conexión, lista de dispositivos y botones de navegación
+  // Pantalla principal
   const renderMainScreen = () => (
     <View style={styles.container}>
       <Text style={styles.status}>
-        {connectedDevice ? `Conectado: ${connectedDevice.name || connectedDevice.localName}` : "Desconectado"}
+        {connectedDevice ? `Conectado: ${connectedDevice.name || connectedDevice.localName}` : 'Desconectado'}
       </Text>
-      {!connectedDevice && (
-        <View style={styles.scanContainer}>
-          <Button 
-            title="Escanear Dispositivos" 
-            onPress={scanForDevices} 
-            disabled={scanning || connecting} 
-          />
-          {(scanning || connecting) && (
-            <ActivityIndicator 
-              size="large" 
-              color="#007AFF" 
-              style={styles.loading} 
-            />
-          )}
+      {!connectedDevice ? (
+        <>
+          <Button title="Escanear Dispositivos" onPress={scanForDevices} disabled={scanning || connecting} />
+          {(scanning || connecting) && <ActivityIndicator size="large" color="#007AFF" style={styles.loading} />}
           <FlatList
             data={devices}
-            keyExtractor={(item) => item.id}
+            keyExtractor={item => item.id}
             renderItem={({ item }) => (
-              <TouchableOpacity 
-                style={styles.deviceItem} 
-                onPress={() => connectToDevice(item)}
-                disabled={connecting}
-              >
+              <TouchableOpacity style={styles.deviceItem} onPress={() => connectToDevice(item)} disabled={connecting}>
                 <Text>{item.name || item.localName}</Text>
                 <Text style={styles.deviceId}>{item.id}</Text>
               </TouchableOpacity>
             )}
-            ListEmptyComponent={() => (
-              <Text style={styles.noDevices}>No se encontraron dispositivos</Text>
-            )}
+            ListEmptyComponent={() => <Text style={styles.noDevices}>No se encontraron dispositivos</Text>}
           />
-        </View>
-      )}
-      {connectedDevice && (
+        </>
+      ) : (
         <View style={styles.buttonsContainer}>
-          <Button 
-            title="Actualizar Usuario" 
-            onPress={() => setScreen('updateUser')}
-            disabled={!connectedDevice || connecting}
-          />
-          <Button 
-            title="Actualizar Firmware" 
-            onPress={() => setScreen('firmwareUpdate')}
-            disabled={!connectedDevice || connecting}
-          />
-          <Button 
-            title="Desconectar" 
-            onPress={disconnectDevice}
-            disabled={connecting}
-          />
+          <Button title="Actualizar Usuario" onPress={() => setScreen('updateUser')} />
+          <Button title="Actualizar Firmware" onPress={() => setScreen('firmwareUpdate')} />
+          <Button title="Desconectar" onPress={disconnectDevice} />
         </View>
       )}
-      {/* Mostrar información de servicios si hay dispositivo conectado */}
-      {connectedDevice && renderServices()}
     </View>
   );
 
-  // Renderizado según la pantalla seleccionada
   const renderScreen = () => {
-    if (screen === 'main') {
-      return renderMainScreen();
-    } else if (screen === 'updateUser') {
-      return <UpdateUsername onBack={() => setScreen('main')} connectedDevice={connectedDevice} />;
-    } else if (screen === 'firmwareUpdate') {
-      return <FirmwareUpdate onBack={() => setScreen('main')} connectedDevice={connectedDevice} />;
-    }
+    if (screen === 'updateUser') return <UpdateUsername onBack={() => setScreen('main')} connectedDevice={connectedDevice} />;
+    if (screen === 'firmwareUpdate') return <FirmwareUpdate onBack={() => setScreen('main')} connectedDevice={connectedDevice} />;
+    return renderMainScreen();
   };
 
-  return (
-    <View style={styles.appContainer}>
-      {renderScreen()}
-    </View>
-  );
+  return <View style={styles.appContainer}>{renderScreen()}</View>;
 }
 
 const styles = StyleSheet.create({
-  appContainer: {
-    flex: 1,
-    padding: 20,
-    backgroundColor: '#fff',
-  },
-  container: {
-    flex: 1,
-  },
-  status: {
-    fontSize: 18,
-    textAlign: 'center',
-    marginBottom: 10,
-  },
-  scanContainer: {
-    flex: 1,
-  },
-  loading: {
-    marginVertical: 10,
-  },
-  deviceItem: {
-    padding: 10,
-    borderBottomWidth: 1,
-    borderColor: '#ccc',
-  },
-  deviceId: {
-    fontSize: 12,
-    color: '#555',
-  },
-  noDevices: {
-    textAlign: 'center',
-    marginTop: 20,
-    color: '#999',
-  },
-  buttonsContainer: {
-    marginTop: 20,
-    justifyContent: 'space-around',
-    height: 150,
-  },
-  servicesContainer: {
-    marginTop: 20,
-    borderTopWidth: 1,
-    borderColor: '#ccc',
-    paddingTop: 10,
-  },
-  servicesTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    textAlign: 'center',
-  },
-  serviceItem: {
-    marginVertical: 5,
-  },
-  serviceUUID: {
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  charUUID: {
-    fontSize: 12,
-    marginLeft: 10,
-  },
+  appContainer: { flex: 1, padding: 20, backgroundColor: '#fff' },
+  container: { flex: 1 },
+  status: { fontSize: 18, textAlign: 'center', marginBottom: 10 },
+  loading: { marginVertical: 10 },
+  deviceItem: { padding: 10, borderBottomWidth: 1, borderColor: '#ccc' },
+  deviceId: { fontSize: 12, color: '#555' },
+  noDevices: { textAlign: 'center', marginTop: 20, color: '#999' },
+  buttonsContainer: { marginTop: 20, justifyContent: 'space-around', height: 150 },
 });
