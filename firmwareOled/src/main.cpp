@@ -12,6 +12,8 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include <mbedtls/sha256.h>
+#include <Preferences.h>
+Preferences prefs;
 
 // -------------------------
 // Pines y Constantes
@@ -58,6 +60,7 @@ unsigned long lastBatteryUpdate = 0;
 const unsigned long batteryUpdateInterval = 5000;
 int cachedBatteryPercentage = 0;
 String usuarioActual = "";
+
 
 // Variables para la cuenta regresiva de estabilización
 bool startupDone = false;
@@ -319,6 +322,10 @@ class MyDFUCallbacks : public NimBLECharacteristicCallbacks {
         Serial.println("Error decodificando Base64");
       } else {
         usuarioActual = String((char*)decodedBuffer, decodedLength);
+        prefs.begin("config", false);  // false = escritura
+        prefs.putString("user", usuarioActual);
+        prefs.end();
+
         menuActivo = false;
         Serial.print("Usuario recibido: ");
         Serial.println(usuarioActual);
@@ -474,8 +481,18 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("Setup iniciado");
+
+
   
   Wire.begin(SDA_PIN, SCL_PIN);
+  
+  prefs.begin("config", true);  // true = solo lectura
+  usuarioActual = prefs.getString("user", "");
+  prefs.end();
+  Serial.print("Usuario cargado desde NVS: ");
+  Serial.println(usuarioActual);
+
+  
   setupBLE();
   
   u8g2.begin();
@@ -771,14 +788,15 @@ void loop() {
       u8g2.drawVLine(127, 0, 64);
       
       u8g2.setFont(u8g2_font_ncenB08_tr);
-      String user = "elDani";
+      String user = usuarioActual;
       uint16_t UserWidth = u8g2.getStrWidth(user.c_str());
       int16_t xPosUser = (128 - UserWidth) / 2;
       if (xPosUser < 0) xPosUser = 0;
       u8g2.setCursor(xPosUser, 62);
       u8g2.print(user);
-  
+      
       u8g2.sendBuffer();
+      
     }
   }
   delay(100);

@@ -10,19 +10,18 @@ export default function UpdateUsername({ onBack }) {
   const [username, setUsername] = useState('');
   const [updating, setUpdating] = useState(false);
   const [deviceServices, setDeviceServices] = useState([]);
+  const [loadingServices, setLoadingServices] = useState(true);
 
-  // Log para verificar el dispositivo conectado
-  console.log("UpdateUsername: connectedDevice =", connectedDevice);
-
+  // Detectar cambios en el dispositivo y cargar servicios
   useEffect(() => {
     const fetchServices = async () => {
       if (connectedDevice) {
         try {
-          // Opcional: Forzar descubrimiento de servicios
+          console.log("🔍 Descubriendo servicios y características...");
           await connectedDevice.discoverAllServicesAndCharacteristics();
           const services = await connectedDevice.services();
-          console.log("UpdateUsername: Número de servicios descubiertos =", services.length);
           const servicesData = [];
+
           for (const service of services) {
             const characteristics = await service.characteristics();
             servicesData.push({
@@ -30,16 +29,21 @@ export default function UpdateUsername({ onBack }) {
               characteristics: characteristics.map(char => char.uuid),
             });
           }
+
           setDeviceServices(servicesData);
-          console.log("Servicios en UpdateUsername:", servicesData);
+          console.log("🧩 Servicios descubiertos:", servicesData);
         } catch (err) {
-          console.error("Error obteniendo servicios en UpdateUsername:", err);
+          console.error("❌ Error obteniendo servicios:", err);
         }
       } else {
         setDeviceServices([]);
       }
+      setLoadingServices(false);
     };
-    fetchServices();
+
+    if (connectedDevice) {
+      fetchServices();
+    }
   }, [connectedDevice]);
 
   const updateUsername = async () => {
@@ -49,35 +53,49 @@ export default function UpdateUsername({ onBack }) {
     }
     setUpdating(true);
     try {
-      let device;
-      if (connectedDevice) {
-        device = connectedDevice;
-        console.log("Usando dispositivo conectado:", device.name || device.localName);
-      } else {
+      let device = connectedDevice;
+
+      if (!device) {
         console.log("No hay dispositivo conectado, iniciando escaneo...");
         device = await scanAndConnect(TARGET_DEVICE_NAME);
       }
+
       if (!device) {
         throw new Error("No se pudo obtener un dispositivo conectado.");
       }
+
+      await device.discoverAllServicesAndCharacteristics();
+
       const base64Username = Buffer.from(username).toString('base64');
-      console.log("Enviando nombre (base64):", base64Username);
+      console.log("📤 Enviando nombre (base64):", base64Username);
+
       await device.writeCharacteristicWithResponseForService(
         config.usernameServiceUUID,
         config.usernameCharacteristicUUID,
         base64Username
       );
-      Alert.alert("Éxito", "Nombre de usuario actualizado correctamente");
+
+      Alert.alert("✅ Éxito", "Nombre de usuario actualizado correctamente");
     } catch (error) {
       console.error("Error en updateUsername:", error);
-      Alert.alert("Error al actualizar el nombre de usuario", error.message);
+      Alert.alert("❌ Error", error.message);
     } finally {
       setUpdating(false);
     }
   };
 
   const renderServices = () => {
+    if (loadingServices) {
+      return (
+        <View style={styles.servicesContainer}>
+          <ActivityIndicator size="small" color="#007AFF" />
+          <Text style={{ textAlign: 'center', marginTop: 5 }}>Cargando servicios...</Text>
+        </View>
+      );
+    }
+
     if (!connectedDevice) return null;
+
     return (
       <View style={styles.servicesContainer}>
         <Text style={styles.servicesTitle}>Servicios y Características</Text>
@@ -86,9 +104,7 @@ export default function UpdateUsername({ onBack }) {
         ) : (
           deviceServices.map((serviceData, index) => (
             <View key={index} style={styles.serviceItem}>
-              <Text style={styles.serviceUUID}>
-                Service: {serviceData.serviceUUID}
-              </Text>
+              <Text style={styles.serviceUUID}>Service: {serviceData.serviceUUID}</Text>
               {serviceData.characteristics.map((charUUID, idx) => (
                 <Text key={idx} style={styles.charUUID}>
                   Characteristic: {charUUID}
@@ -100,6 +116,7 @@ export default function UpdateUsername({ onBack }) {
       </View>
     );
   };
+
 
   return (
     <View style={styles.container}>
@@ -129,7 +146,7 @@ const styles = StyleSheet.create({
   container: {
     padding: 20,
     backgroundColor: '#fff',
-    flex: 1
+    flex: 1,
   },
   title: {
     fontSize: 20,
