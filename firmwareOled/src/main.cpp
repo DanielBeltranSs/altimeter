@@ -61,6 +61,26 @@ const unsigned long batteryUpdateInterval = 5000;
 int cachedBatteryPercentage = 0;
 String usuarioActual = "";
 
+// Número total de opciones en el menú y opciones por página
+// Ahora se agregan dos nuevas opciones: "Invertir" y "Ahorro"
+const int TOTAL_OPCIONES = 7;
+const int OPCIONES_POR_PAGINA = 3;
+
+// Variable para controlar si se invierten los colores (true = inverso, false = normal)
+bool inversionActiva = true;
+
+// Variables para Modo Ahorro:
+// Se define un arreglo de tiempos predefinidos (en milisegundos)
+// 0 = desactivado, 60000 = 1 min, 120000 = 2 min, 300000 = 5 min.
+const unsigned long TIMEOUT_OPTIONS[] = {0, 60000, 120000, 300000};
+const int NUM_TIMEOUT_OPTIONS = 4;
+int ahorroTimeoutOption = 0;  // índice actual en TIMEOUT_OPTIONS
+unsigned long ahorroTimeoutMs = TIMEOUT_OPTIONS[ahorroTimeoutOption];
+
+// Variables para detectar cambios de altitud (en metros)
+float lastAltForAhorro = 0;
+unsigned long lastAltChangeTime = 0;
+const float ALT_CHANGE_THRESHOLD = 1;  // Umbral de 0.1 m
 
 // Variables para la cuenta regresiva de estabilización
 bool startupDone = false;
@@ -475,14 +495,97 @@ void mostrarCuentaRegresiva() {
 }
 
 // -------------------------
+// Función para dibujar el menú con paginación
+// -------------------------
+void dibujarMenu() {
+  int paginaActual = menuOpcion / OPCIONES_POR_PAGINA;
+  int totalPaginas = (TOTAL_OPCIONES + OPCIONES_POR_PAGINA - 1) / OPCIONES_POR_PAGINA;
+  int inicio = paginaActual * OPCIONES_POR_PAGINA;
+  int fin = inicio + OPCIONES_POR_PAGINA;
+  if (fin > TOTAL_OPCIONES) fin = TOTAL_OPCIONES;
+  
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  
+  // Encabezado
+  u8g2.setCursor(0, 12);
+  u8g2.print("MENU:");
+  
+  // Dibujar cada opción en la página actual
+  for (int i = inicio; i < fin; i++) {
+    int y = 24 + (i - inicio) * 12; // Separación vertical
+    // Mostrar indicador de selección
+    if (i == menuOpcion) {
+      u8g2.setCursor(0, y);
+      u8g2.print("> ");
+    } else {
+      u8g2.setCursor(0, y);
+      u8g2.print("  ");
+    }
+    
+    // Mostrar el texto y valor de cada opción
+    switch(i) {
+      case 0:
+        u8g2.print("Unidad: ");
+        u8g2.print(unidadMetros ? "metros" : "pies");
+        break;
+      case 1:
+        u8g2.print("Brillo: ");
+        u8g2.print(brilloPantalla);
+        break;
+      case 2:
+        u8g2.print("Altura: ");
+        switch (altFormat) {
+          case 0: u8g2.print("normal"); break;
+          case 1: u8g2.print("1 decimal"); break;
+          case 2: u8g2.print("2 decimales"); break;
+          case 3: u8g2.print("3 decimales"); break;
+        }
+        break;
+      case 3:
+        u8g2.print("Bateria");
+        break;
+      case 4:
+        u8g2.print("BL: ");
+        u8g2.print(bleActivo ? "ON" : "OFF");
+        break;
+      case 5:
+        u8g2.print("Invertir: ");
+        u8g2.print(inversionActiva ? "ON" : "OFF");
+        break;
+      case 6:
+        u8g2.print("Ahorro: ");
+        if (ahorroTimeoutMs == 0)
+          u8g2.print("OFF");
+        else
+          u8g2.print(String(ahorroTimeoutMs/60000) + " min");
+        break;
+    }
+  }
+  
+  // Indicador de página y flechas si hay más opciones
+  u8g2.setCursor(100, 63);
+  u8g2.print(String(paginaActual + 1) + "/" + String(totalPaginas));
+  
+  if (paginaActual > 0) {
+    u8g2.setCursor(0, 63);
+    u8g2.print("<");
+  }
+  if (paginaActual < totalPaginas - 1) {
+    u8g2.setCursor(120, 63);
+    u8g2.print(">");
+  }
+  
+  u8g2.sendBuffer();
+}
+
+// -------------------------
 // SETUP
 // -------------------------
 void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("Setup iniciado");
-
-
   
   Wire.begin(SDA_PIN, SCL_PIN);
   
@@ -491,12 +594,12 @@ void setup() {
   prefs.end();
   Serial.print("Usuario cargado desde NVS: ");
   Serial.println(usuarioActual);
-
   
   setupBLE();
   
   u8g2.begin();
-  u8g2.sendF("c", 0xA7);  
+  // Se envía inicialmente el comando de inversión (0xA7)
+  u8g2.sendF("c", 0xA7);
   u8g2.setPowerSave(false);
   u8g2.setContrast(brilloPantalla);
   
@@ -524,7 +627,13 @@ void setup() {
       esp_ota_mark_app_valid_cancel_rollback();
     }
   }
-
+  
+  // Inicializar valores para ahorro (se usa la altitud actual)
+  if (bmp.performReading()) {
+    lastAltForAhorro = bmp.readAltitude(1013.25);
+  }
+  lastAltChangeTime = millis();
+  
   Serial.println("Setup completado");
 }
 
@@ -538,15 +647,15 @@ void loop() {
     return;
   }
   
-  // Si hay una alerta pendiente de confirmacion OTA, la mostramos y gestionamos sus botones
+  // Si hay una alerta pendiente de confirmacion OTA, se muestra y se gestionan los botones
   if (otaConfirmationPending) {
     dibujarAlertaOTA();
-    // Botón para alternar la opción (usando BUTTON_ALTITUDE)
+    // Botón para alternar la opción (BUTTON_ALTITUDE)
     if (digitalRead(BUTTON_ALTITUDE) == LOW) {
       otaConfirmationOption = (otaConfirmationOption + 1) % 2; // 0 o 1
       delay(200);
     }
-    // Botón para confirmar la selección (usando BUTTON_OLED)
+    // Botón para confirmar la selección (BUTTON_OLED)
     if (digitalRead(BUTTON_OLED) == LOW) {
       if (otaConfirmationOption == 0) {
         Serial.println("Usuario acepto la actualizacion OTA.");
@@ -560,11 +669,26 @@ void loop() {
     return;
   }
   
-  // Proceso normal del loop
+  // Leer sensor de altitud
   bool sensorOk = bmp.performReading();
   float altitudActual = sensorOk ? bmp.readAltitude(1013.25) : 0;
   
-  // Gestión de botones para el menú normal
+  // Si no se está en el menú y el modo ahorro está configurado (timeout > 0),
+  // se verifica si la altitud ha cambiado significativamente
+  if (!menuActivo && sensorOk && ahorroTimeoutMs > 0) {
+    if (fabs(altitudActual - lastAltForAhorro) > ALT_CHANGE_THRESHOLD) {
+      lastAltForAhorro = altitudActual;
+      lastAltChangeTime = millis();
+    } else {
+      if ((millis() - lastAltChangeTime) >= ahorroTimeoutMs && pantallaEncendida) {
+        u8g2.setPowerSave(true);
+        pantallaEncendida = false;
+        Serial.println("Modo ahorro: Pantalla suspendida por inactividad de altitud.");
+      }
+    }
+  }
+  
+  // Gestión de botones para el menú
   if (digitalRead(BUTTON_MENU) == LOW) {
     menuActivo = !menuActivo;
     if (menuActivo) {
@@ -580,7 +704,7 @@ void loop() {
   
   if (digitalRead(BUTTON_ALTITUDE) == LOW) {
     if (menuActivo) {
-      menuOpcion = (menuOpcion + 1) % 5;
+      menuOpcion = (menuOpcion + 1) % TOTAL_OPCIONES;
       if (menuOpcion != 3) batteryMenuActive = false;
       menuStartTime = millis();
       Serial.print("Opcion del menu cambiada a: ");
@@ -590,6 +714,8 @@ void loop() {
         case 2: Serial.println("Formato Altura"); break;
         case 3: Serial.println("Bateria"); break;
         case 4: Serial.println("BL"); break;
+        case 5: Serial.println("Invertir"); break;
+        case 6: Serial.println("Ahorro"); break;
       }
     } else {
       altitudReferencia = altitudActual;
@@ -600,6 +726,7 @@ void loop() {
   
   if (digitalRead(BUTTON_OLED) == LOW) {
     if (menuActivo) {
+      // Acciones según la opción seleccionada
       switch (menuOpcion) {
         case 0:
           unidadMetros = !unidadMetros;
@@ -633,6 +760,26 @@ void loop() {
           Serial.print("BLE ahora esta: ");
           Serial.println(bleActivo ? "ON" : "OFF");
           break;
+        case 5:
+          inversionActiva = !inversionActiva;
+          if (inversionActiva) {
+            u8g2.sendF("c", 0xA7);  // Comando para invertir display
+            Serial.println("Display invertido (colores invertidos).");
+          } else {
+            u8g2.sendF("c", 0xA6);  // Comando para modo normal
+            Serial.println("Display en modo normal.");
+          }
+          break;
+        case 6:
+          // Actualizar la opción de ahorro: ciclar entre tiempos predefinidos
+          ahorroTimeoutOption = (ahorroTimeoutOption + 1) % NUM_TIMEOUT_OPTIONS;
+          ahorroTimeoutMs = TIMEOUT_OPTIONS[ahorroTimeoutOption];
+          Serial.print("Modo ahorro configurado a: ");
+          if (ahorroTimeoutMs == 0)
+            Serial.println("OFF");
+          else
+            Serial.print(String(ahorroTimeoutMs/60000) + " min");
+          break;
       }
       menuStartTime = millis();
     } else {
@@ -643,7 +790,12 @@ void loop() {
       } else {
         u8g2.setPowerSave(false);
         pantallaEncendida = true;
-        Serial.println("Pantalla activada.");
+        // Reiniciamos el temporizador de ahorro y actualizamos la última altitud
+        lastAltChangeTime = millis();
+        if (bmp.performReading()) {
+          lastAltForAhorro = bmp.readAltitude(1013.25);
+        }
+        Serial.println("Pantalla activada y temporizador reiniciado.");
       }
     }
     delay(50);
@@ -687,49 +839,8 @@ void loop() {
       }
     } else {
       if (pantallaEncendida) {
-        u8g2.clearBuffer();
-        u8g2.setFont(u8g2_font_ncenB08_tr);
-        u8g2.setCursor(0,12);
-        u8g2.print("MENU:");
-        u8g2.setCursor(0,24);
-        if (menuOpcion == 0)
-          u8g2.print("> Unidad: ");
-        else
-          u8g2.print("  Unidad: ");
-        u8g2.print(unidadMetros ? "metros" : "pies");
-  
-        u8g2.setCursor(0,36);
-        if (menuOpcion == 1)
-          u8g2.print("> Brillo: ");
-        else
-          u8g2.print("  Brillo: ");
-        u8g2.print(brilloPantalla);
-  
-        u8g2.setCursor(0,48);
-        if (menuOpcion == 2)
-          u8g2.print("> Altura: ");
-        else
-          u8g2.print("  Altura: ");
-        switch (altFormat) {
-          case 0: u8g2.print("normal"); break;
-          case 1: u8g2.print("1 decimal"); break;
-          case 2: u8g2.print("2 decimales"); break;
-          case 3: u8g2.print("3 decimales"); break;
-        }
-  
-        u8g2.setCursor(0,60);
-        if (menuOpcion == 3)
-          u8g2.print("> Bateria");
-        else
-          u8g2.print("  Bateria");
-  
-        u8g2.setCursor(60,60);
-        if (menuOpcion == 4)
-          u8g2.print("> BL: " + String(bleActivo ? "ON" : "OFF"));
-        else
-          u8g2.print("  BL: " + String(bleActivo ? "ON" : "OFF"));
-  
-        u8g2.sendBuffer();
+        // Dibujar menú paginado
+        dibujarMenu();
       }
     }
   } else {

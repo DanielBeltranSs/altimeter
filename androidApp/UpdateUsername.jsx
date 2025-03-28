@@ -1,3 +1,4 @@
+// UpdateUsername.js
 import React, { useState, useContext, useEffect } from 'react';
 import { View, Text, TextInput, Button, Alert, StyleSheet, ActivityIndicator } from 'react-native';
 import { BleContext } from './BleProvider';
@@ -12,7 +13,6 @@ export default function UpdateUsername({ onBack }) {
   const [deviceServices, setDeviceServices] = useState([]);
   const [loadingServices, setLoadingServices] = useState(true);
 
-  // Detectar cambios en el dispositivo y cargar servicios
   useEffect(() => {
     const fetchServices = async () => {
       if (connectedDevice) {
@@ -29,7 +29,6 @@ export default function UpdateUsername({ onBack }) {
               characteristics: characteristics.map(char => char.uuid),
             });
           }
-
           setDeviceServices(servicesData);
           console.log("🧩 Servicios descubiertos:", servicesData);
         } catch (err) {
@@ -54,16 +53,13 @@ export default function UpdateUsername({ onBack }) {
     setUpdating(true);
     try {
       let device = connectedDevice;
-
       if (!device) {
         console.log("No hay dispositivo conectado, iniciando escaneo...");
         device = await scanAndConnect(TARGET_DEVICE_NAME);
       }
-
       if (!device) {
         throw new Error("No se pudo obtener un dispositivo conectado.");
       }
-
       await device.discoverAllServicesAndCharacteristics();
 
       const base64Username = Buffer.from(username).toString('base64');
@@ -74,7 +70,6 @@ export default function UpdateUsername({ onBack }) {
         config.usernameCharacteristicUUID,
         base64Username
       );
-
       Alert.alert("✅ Éxito", "Nombre de usuario actualizado correctamente");
     } catch (error) {
       console.error("Error en updateUsername:", error);
@@ -93,9 +88,7 @@ export default function UpdateUsername({ onBack }) {
         </View>
       );
     }
-
     if (!connectedDevice) return null;
-
     return (
       <View style={styles.servicesContainer}>
         <Text style={styles.servicesTitle}>Servicios y Características</Text>
@@ -116,7 +109,6 @@ export default function UpdateUsername({ onBack }) {
       </View>
     );
   };
-
 
   return (
     <View style={styles.container}>

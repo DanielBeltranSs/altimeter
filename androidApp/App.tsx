@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+// App.js
+import React, { useState, useContext, useEffect } from 'react';
 import { 
   View, 
   Text, 
@@ -11,17 +12,15 @@ import {
   PermissionsAndroid,
   Platform
 } from 'react-native';
-import { BleManager } from 'react-native-ble-plx';
+import { BleProvider, BleContext } from './BleProvider';
 import UpdateUsername from './UpdateUsername';
 import FirmwareUpdate from './FirmwareUpdate';
 
-export default function App() {
-  const [bleManager] = useState(new BleManager());
+const MainScreen = ({ setScreen }) => {
+  const { bleManager, connectedDevice, scanAndConnect, disconnect } = useContext(BleContext);
   const [scanning, setScanning] = useState(false);
   const [devices, setDevices] = useState([]);
-  const [connectedDevice, setConnectedDevice] = useState(null);
   const [connecting, setConnecting] = useState(false);
-  const [screen, setScreen] = useState('main'); // "main", "updateUser", "firmwareUpdate"
 
   // Solicitar permisos en Android
   const requestPermissions = async () => {
@@ -41,10 +40,10 @@ export default function App() {
 
   useEffect(() => {
     requestPermissions();
-    return () => bleManager.destroy();
+    // No destruimos el bleManager acá ya que se gestiona en el provider
   }, []);
 
-  // Escanear dispositivos BLE
+  // Escanear dispositivos BLE y mostrarlos en lista
   const scanForDevices = () => {
     setDevices([]);
     setScanning(true);
@@ -68,16 +67,15 @@ export default function App() {
     }, 10000);
   };
 
-  // Conectar a dispositivo BLE
+  // Conectar a un dispositivo seleccionado
   const connectToDevice = async (device) => {
     try {
       setConnecting(true);
       bleManager.stopDeviceScan();
       setScanning(false);
       console.log('Conectando a:', device.name || device.localName);
-      const connected = await device.connect();
-      await connected.discoverAllServicesAndCharacteristics();
-      setConnectedDevice(connected);
+      // Utilizamos scanAndConnect para que el provider actualice la conexión global
+      const connected = await scanAndConnect("ESP32-Altimetro-ota");
       Alert.alert('Conectado', `Conectado a ${connected.name || connected.localName}`);
     } catch (error) {
       console.error('Error al conectar:', error);
@@ -87,14 +85,6 @@ export default function App() {
     }
   };
 
-  const disconnectDevice = async () => {
-    if (connectedDevice) {
-      await connectedDevice.cancelConnection();
-      setConnectedDevice(null);
-    }
-  };
-
-  // Pantalla principal
   const renderMainScreen = () => (
     <View style={styles.container}>
       <Text style={styles.status}>
@@ -120,19 +110,37 @@ export default function App() {
         <View style={styles.buttonsContainer}>
           <Button title="Actualizar Usuario" onPress={() => setScreen('updateUser')} />
           <Button title="Actualizar Firmware" onPress={() => setScreen('firmwareUpdate')} />
-          <Button title="Desconectar" onPress={disconnectDevice} />
+          <Button title="Desconectar" onPress={disconnect} />
         </View>
       )}
     </View>
   );
 
+  return renderMainScreen();
+};
+
+const AppContent = () => {
+  const [screen, setScreen] = useState('main'); // 'main', 'updateUser', 'firmwareUpdate'
+
   const renderScreen = () => {
-    if (screen === 'updateUser') return <UpdateUsername onBack={() => setScreen('main')} connectedDevice={connectedDevice} />;
-    if (screen === 'firmwareUpdate') return <FirmwareUpdate onBack={() => setScreen('main')} connectedDevice={connectedDevice} />;
-    return renderMainScreen();
+    if (screen === 'updateUser') return <UpdateUsername onBack={() => setScreen('main')} />;
+    if (screen === 'firmwareUpdate') return <FirmwareUpdate onBack={() => setScreen('main')} />;
+    return <MainScreen setScreen={setScreen} />;
   };
 
-  return <View style={styles.appContainer}>{renderScreen()}</View>;
+  return (
+    <View style={styles.appContainer}>
+      {renderScreen()}
+    </View>
+  );
+};
+
+export default function App() {
+  return (
+    <BleProvider>
+      <AppContent />
+    </BleProvider>
+  );
 }
 
 const styles = StyleSheet.create({
