@@ -4,10 +4,14 @@ import { View, Text, TextInput, Button, Alert, StyleSheet, ActivityIndicator } f
 import { BleContext } from './BleProvider';
 import { Buffer } from 'buffer';
 
-const TARGET_DEVICE_NAME = "ESP32-Altimetro-ota";
+// BLE – UUIDs para actualización de usuario
+const USERNAME_SERVICE_UUID = "12345678-1234-1234-1234-1234567890ab";
+const USERNAME_CHARACTERISTIC_UUID = "abcd1234-ab12-cd34-ef56-1234567890ab";
+
+const TARGET_DEVICE_NAME = "ESP32-FIR";
 
 export default function UpdateUsername({ onBack }) {
-  const { scanAndConnect, connectedDevice, config } = useContext(BleContext);
+  const { scanAndConnect, connectedDevice } = useContext(BleContext);
   const [username, setUsername] = useState('');
   const [updating, setUpdating] = useState(false);
   const [deviceServices, setDeviceServices] = useState([]);
@@ -62,12 +66,13 @@ export default function UpdateUsername({ onBack }) {
       }
       await device.discoverAllServicesAndCharacteristics();
 
+      // Convertir el nombre de usuario a base64 antes de enviarlo
       const base64Username = Buffer.from(username).toString('base64');
-      console.log("📤 Enviando nombre (base64):", base64Username);
+      console.log("📤 Enviando nombre en base64:", base64Username);
 
       await device.writeCharacteristicWithResponseForService(
-        config.usernameServiceUUID,
-        config.usernameCharacteristicUUID,
+        USERNAME_SERVICE_UUID,
+        USERNAME_CHARACTERISTIC_UUID,
         base64Username
       );
       Alert.alert("✅ Éxito", "Nombre de usuario actualizado correctamente");

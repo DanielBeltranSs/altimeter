@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include "esp_bt.h"
 #include <Wire.h>
 #include <U8g2lib.h>
 #include <Adafruit_BMP3XX.h>
@@ -9,50 +8,49 @@
 #include <NimBLE2904.h>
 #include <driver/adc.h>
 #include <math.h>
-#include "esp_ota_ops.h"
-#include "esp_partition.h"
-#include <mbedtls/sha256.h>
+#include <esp_task_wdt.h>
 #include <Preferences.h>
+#include <Update.h>
+
+// NVS
 Preferences prefs;
 
 // -------------------------
 // Pines y Constantes
 // -------------------------
-
-// Pines I²C
 #define SDA_PIN 4
 #define SCL_PIN 5
 
-// Direcciones I²C
 #define OLED_ADDR 0x3C
 #define BMP_ADDR  0x77
 
-// Pin ADC para batería (GPIO1)
 #define BATTERY_PIN 1  
 
 // Pines de botones
-#define BUTTON_ALTITUDE 6  // Reinicia altitud o cicla opciones en menú/alerta
-#define BUTTON_OLED     8  // Apaga/reactiva la pantalla o confirma selección en menú/alerta
-#define BUTTON_MENU     7  // Abre/cierra el menú
+#define BUTTON_ALTITUDE 6   // Reinicia altitud o cicla opciones en menú/alerta
+#define BUTTON_OLED     8   // Apaga/reactiva la pantalla o confirma selección en menú/alerta
+#define BUTTON_MENU     7   // Abre/cierra el menú
 
-// BLE – Servicio principal y característica
-#define SERVICE_UUID        "4fafc200-1fb5-459e-8fcc-c5c9c331914b"
-#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+// BLE – UUIDs para altímetro y DFU
+#define SERVICE_UUID        "4fafc200-1fb5-459e-8fcc-c5c9c331914b"  // Servicio principal para altímetro
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"  // Característica para altitud
 
-// BLE – Servicio DFU (para OTA)
-#define DFU_SERVICE_UUID         "e3c0f200-3b0b-4253-9f53-3a351d8a146e"
-#define DFU_CHARACTERISTIC_UUID  "e3c0f200-3b0b-4253-9f53-3a351d8a146e"
+#define DFU_SERVICE_UUID         "e3c0f200-3b0b-4253-9f53-3a351d8a146e"  // Servicio DFU OTA
+#define DFU_CHARACTERISTIC_UUID  "e3c0f200-3b0b-4253-9f53-3a351d8a146e"  // Característica para recibir firmware
+
+// BLE – UUIDs para actualización de usuario
+#define USERNAME_SERVICE_UUID        "12345678-1234-1234-1234-1234567890ab"
+#define USERNAME_CHARACTERISTIC_UUID "abcd1234-ab12-cd34-ef56-1234567890ab"
 
 // -------------------------
 // Variables Globales
 // -------------------------
-
 bool pantallaEncendida = true;
 bool menuActivo = false;
 int menuOpcion = 0;
 unsigned long menuStartTime = 0;
 int brilloPantalla = 255;
-bool unidadMetros = false;  // false = pies, true = metros
+bool unidadMetros = false;   // false = pies, true = metros
 int altFormat = 0;
 bool batteryMenuActive = false;
 bool bleActivo = true;
@@ -61,28 +59,20 @@ const unsigned long batteryUpdateInterval = 5000;
 int cachedBatteryPercentage = 0;
 String usuarioActual = "";
 
-// Número total de opciones en el menú y opciones por página
-// Ahora se agregan dos nuevas opciones: "Invertir" y "Ahorro"
 const int TOTAL_OPCIONES = 7;
 const int OPCIONES_POR_PAGINA = 3;
 
-// Variable para controlar si se invierten los colores (true = inverso, false = normal)
-bool inversionActiva = true;
+bool inversionActiva = true;  // Estado de inversión de pantalla
 
-// Variables para Modo Ahorro:
-// Se define un arreglo de tiempos predefinidos (en milisegundos)
-// 0 = desactivado, 60000 = 1 min, 120000 = 2 min, 300000 = 5 min.
 const unsigned long TIMEOUT_OPTIONS[] = {0, 60000, 120000, 300000};
 const int NUM_TIMEOUT_OPTIONS = 4;
-int ahorroTimeoutOption = 0;  // índice actual en TIMEOUT_OPTIONS
+int ahorroTimeoutOption = 0;
 unsigned long ahorroTimeoutMs = TIMEOUT_OPTIONS[ahorroTimeoutOption];
 
-// Variables para detectar cambios de altitud (en metros)
 float lastAltForAhorro = 0;
 unsigned long lastAltChangeTime = 0;
-const float ALT_CHANGE_THRESHOLD = 1;  // Umbral de 0.1 m
+const float ALT_CHANGE_THRESHOLD = 1;
 
-// Variables para la cuenta regresiva de estabilización
 bool startupDone = false;
 unsigned long startupStartTime = 0;
 const unsigned long startupCountdownTime = 5000;  // 5 segundos
@@ -92,39 +82,120 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 // Sensor BMP390L
 Adafruit_BMP3XX bmp;
-
-// Altitud de referencia (para altitud relativa)
 float altitudReferencia = 0.0;
 
-// BLE – Característica principal
+// BLE – Variables globales NimBLE
 NimBLECharacteristic *pCharacteristic = nullptr;
-
-// Variables para OTA DFU
-esp_ota_handle_t ota_handle = 0;
-const esp_partition_t* update_partition = NULL;
-bool dfu_in_progress = false;
-
-// Variables para alerta de actualización OTA
-volatile bool otaConfirmationPending = false; // Activa modo confirmación
-volatile int otaConfirmationOption = 0;         // 0: Aceptar, 1: Cancelar
+bool updateStarted = false;
+bool deviceConnected = false;
 
 // -------------------------
-// Variables para Validación de Integridad
+// Funciones de configuración no volátil (NVS)
 // -------------------------
+void loadConfig() {
+  prefs.begin("config", false);
+  unidadMetros   = prefs.getBool("unit", false);
+  brilloPantalla = prefs.getInt("brillo", 255);
+  altFormat      = prefs.getInt("altFormat", 0);
+  ahorroTimeoutOption = prefs.getInt("ahorro", 0);
+  ahorroTimeoutMs = TIMEOUT_OPTIONS[ahorroTimeoutOption];
+  inversionActiva = prefs.getBool("invert", true);
+  prefs.end();
+}
 
-// Valor predefinido del hash esperado (32 bytes para SHA-256)
-// En producción este valor se debe definir o recibir de forma segura.
-uint8_t hashEsperado[32] = { /* Rellenar con el hash esperado */ };
-std::string firmaDigitalRecibida;
+void saveConfig() {
+  prefs.begin("config", false);
+  prefs.putBool("unit", unidadMetros);
+  prefs.putInt("brillo", brilloPantalla);
+  prefs.putInt("altFormat", altFormat);
+  prefs.putInt("ahorro", ahorroTimeoutOption);
+  prefs.putBool("invert", inversionActiva);
+  prefs.end();
+}
 
-// Contexto para cálculo incremental del hash
-mbedtls_sha256_context sha256_ctx;
-bool checksum_inicializado = false;
+// -------------------------
+// Callbacks de BLE
+// -------------------------
+class MyServerCallbacks: public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* pServer, ble_gap_conn_desc* desc) { 
+    deviceConnected = true;
+    Serial.println("[BLE] Cliente conectado");
+  }
+  void onDisconnect(NimBLEServer* pServer, ble_gap_conn_desc* desc) { 
+    deviceConnected = false;
+    Serial.println("[BLE] Cliente desconectado");
+    pServer->getAdvertising()->start();
+    Serial.println("[BLE] Publicidad reiniciada");
+  }
+};
+
+class DFUCallbacks : public NimBLECharacteristicCallbacks {
+public:
+  DFUCallbacks() {
+    Serial.println("[DFU] DFUCallbacks instanciado");
+  }
+  void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) {
+    Serial.println("[DFU] onWrite personalizado llamado");
+    esp_task_wdt_reset();
+    std::string rxValue = pCharacteristic->getValue();
+    Serial.print("[DFU] Recibido chunk, tamaño: ");
+    Serial.println(rxValue.size());
+
+    if (rxValue == "EOF") {
+      Serial.println("[DFU] Marcador EOF recibido, finalizando actualización");
+      if (Update.end(true)) {
+        Serial.println("[DFU] Actualización completa. Reiniciando...");
+        ESP.restart();
+      } else {
+        Serial.println("[DFU] Error finalizando la actualización");
+      }
+      return;
+    }
+
+    if (!updateStarted) {
+      Serial.println("[DFU] Iniciando actualización OTA");
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+        Serial.println("[DFU] Update.begin() falló");
+        return;
+      }
+      updateStarted = true;
+    }
+
+    size_t written = Update.write((uint8_t*)rxValue.data(), rxValue.length());
+    if (written != rxValue.length()) {
+      Serial.println("[DFU] Error escribiendo el chunk");
+    } else {
+      Serial.print("[DFU] Chunk escrito, longitud: ");
+      Serial.println(written);
+    }
+    delay(1);
+    yield();
+    esp_task_wdt_reset();
+  }
+};
+
+class UsernameCallbacks : public NimBLECharacteristicCallbacks {
+public:
+  UsernameCallbacks() {
+    Serial.println("[USERNAME] Callbacks instanciado");
+  }
+  // Cuando se escribe el nombre de usuario se guarda en NVS
+  void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) {
+    std::string rxValue = pCharacteristic->getValue();
+    Serial.print("[USERNAME] Recibido, tamaño: ");
+    Serial.println(rxValue.size());
+    usuarioActual = String(rxValue.c_str());
+    Serial.print("[USERNAME] Actualizado a: ");
+    Serial.println(usuarioActual);
+    prefs.begin("config", false);
+    prefs.putString("user", usuarioActual);
+    prefs.end();
+  }
+};
 
 // -------------------------
 // Funciones Auxiliares
 // -------------------------
-
 int calcularPorcentajeBateria(float voltaje) {
   if (voltaje >= 4.2) return 100;
   if (voltaje >= 4.1) return 95;
@@ -141,7 +212,7 @@ int calcularPorcentajeBateria(float voltaje) {
 void updateBatteryReading() {
   if (millis() - lastBatteryUpdate >= batteryUpdateInterval) {
     int lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);
-    float voltajeADC = (lecturaADC / 4095.0) * 2.6;  // Voltaje en V
+    float voltajeADC = (lecturaADC / 4095.0) * 2.6;
     float factorCorreccion = 1.238;
     float v_adc = voltajeADC;
     float v_bat = v_adc * 2.0 * factorCorreccion;
@@ -150,380 +221,26 @@ void updateBatteryReading() {
   }
 }
 
-// Actualiza el checksum incrementalmente con cada chunk recibido
-void actualizarChecksum(const uint8_t* data, size_t len) {
-  if (!checksum_inicializado) {
-    mbedtls_sha256_init(&sha256_ctx);
-    mbedtls_sha256_starts_ret(&sha256_ctx, 0); // 0 para SHA-256
-    checksum_inicializado = true;
-  }
-  mbedtls_sha256_update_ret(&sha256_ctx, data, len);
-}
-
-// Calcula el hash completo de la imagen almacenada en la partición OTA
-void calcularHashFirmware(const esp_partition_t* partition, uint8_t* hashCalculado) {
-  const size_t bufferSize = 1024;
-  uint8_t buffer[bufferSize];
-  mbedtls_sha256_context ctx;
-  mbedtls_sha256_init(&ctx);
-  mbedtls_sha256_starts_ret(&ctx, 0);
-
-  size_t offset = 0;
-  size_t remaining = partition->size;
-  while (remaining > 0) {
-    size_t toRead = (remaining > bufferSize) ? bufferSize : remaining;
-    esp_err_t err = esp_partition_read(partition, offset, buffer, toRead);
-    if (err != ESP_OK) {
-      Serial.println("Error al leer la particion para hash");
-      break;
-    }
-    mbedtls_sha256_update_ret(&ctx, buffer, toRead);
-    offset += toRead;
-    remaining -= toRead;
-  }
-  mbedtls_sha256_finish_ret(&ctx, hashCalculado);
-  mbedtls_sha256_free(&ctx);
-}
-
-// Verifica la integridad del firmware comparando el hash calculado con el esperado
-bool verificarIntegridadFirmware() {
-  uint8_t hashCalculado[32];
-  calcularHashFirmware(update_partition, hashCalculado);
-  if(memcmp(hashCalculado, hashEsperado, 32) == 0) {
-    Serial.println("Integridad del firmware verificada correctamente.");
-    return true;
-  } else {
-    Serial.println("Error: Integridad del firmware fallida.");
-    return false;
-  }
-}
-
-// Almacena la firma digital recibida (para verificación posterior)
-void almacenarFirmaDigital(const std::string& firma) {
-  firmaDigitalRecibida = firma;
-  // Aquí se debe implementar la verificación de la firma digital utilizando una clave pública.
-}
-
-// -------------------------
-// Función Base64 Decode
-// -------------------------
-
-// Devuelve el valor base64 para un carácter o -1 si es inválido.
-int base64_char_value(char c) {
-  if (c >= 'A' && c <= 'Z') return c - 'A';
-  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-  if (c >= '0' && c <= '9') return c - '0' + 52;
-  if (c == '+') return 62;
-  if (c == '/') return 63;
-  return -1;
-}
-
-// Decodifica un string base64 en el buffer "out" (debe tener suficiente espacio).
-// Retorna la cantidad de bytes decodificados o -1 en caso de error.
-int base64_decode(const std::string &in, uint8_t *out, int out_max) {
-  int in_len = in.length();
-  int i = 0, j = 0;
-  int value;
-  uint32_t buffer = 0;
-  int bits_collected = 0;
-  while (i < in_len) {
-    char c = in[i++];
-    if (c == '=' || c == '\n' || c == '\r' || c == ' ') {
-      continue;
-    }
-    value = base64_char_value(c);
-    if (value < 0) {
-      // Carácter inválido
-      return -1;
-    }
-    buffer = (buffer << 6) | value;
-    bits_collected += 6;
-    if (bits_collected >= 8) {
-      bits_collected -= 8;
-      if (j >= out_max) return -1; // Salida insuficiente
-      out[j++] = (uint8_t)((buffer >> bits_collected) & 0xFF);
-    }
-  }
-  return j;
-}
-
-// -------------------------
-// Función para dibujar el recuadro de alerta en la pantalla (para OTA)
-// -------------------------
-void dibujarAlertaOTA() {
-  u8g2.clearBuffer();
-  // Dibujar recuadro central
-  int rectX = 5, rectY = 20, rectW = 118, rectH = 40;
-  u8g2.drawFrame(rectX, rectY, rectW, rectH);
-  u8g2.setFont(u8g2_font_ncenB08_tr);
-  // Mensaje de alerta
-  u8g2.setCursor(rectX + 10, rectY + 15);
-  u8g2.print("Desea aceptar");
-  u8g2.setCursor(rectX + 10, rectY + 28);
-  u8g2.print("la actualizacion?");
-  
-  // Opciones
-  String opcionAceptar = "Aceptar";
-  String opcionCancelar = "Cancelar";
-  
-  // Resaltar la opción seleccionada
-  if (otaConfirmationOption == 0) {
-    u8g2.drawBox(rectX + 10, rectY + 32, u8g2.getStrWidth(opcionAceptar.c_str())+2, 10);
-    u8g2.setDrawColor(0); // Texto en blanco sobre fondo negro
-    u8g2.setCursor(rectX + 11, rectY + 41);
-    u8g2.print(opcionAceptar);
-    u8g2.setDrawColor(1);
-    u8g2.setCursor(rectX + 60, rectY + 41);
-    u8g2.print(opcionCancelar);
-  } else {
-    u8g2.drawBox(rectX + 60, rectY + 32, u8g2.getStrWidth(opcionCancelar.c_str())+2, 10);
-    u8g2.setDrawColor(0);
-    u8g2.setCursor(rectX + 60, rectY + 41);
-    u8g2.print(opcionCancelar);
-    u8g2.setDrawColor(1);
-    u8g2.setCursor(rectX + 10, rectY + 41);
-    u8g2.print(opcionAceptar);
-  }
-  
-  u8g2.sendBuffer();
-}
-
-// -------------------------
-// Función para finalizar la OTA (al aceptar la actualización)
-// -------------------------
-void finalizarOTA() {
-  // Verificar la integridad antes de finalizar la OTA
-  if (!verificarIntegridadFirmware()) {
-    Serial.println("Verificacion de integridad fallida, abortando OTA.");
-    esp_ota_abort(ota_handle);
-    dfu_in_progress = false;
-  } else {
-    esp_err_t err = esp_ota_end(ota_handle);
-    if (err != ESP_OK) {
-      Serial.println("esp_ota_end fallo");
-      return;
-    }
-    err = esp_ota_set_boot_partition(update_partition);
-    if (err != ESP_OK) {
-      Serial.println("esp_ota_set_boot_partition fallo");
-    } else {
-      Serial.println("Actualizacion OTA exitosa, reiniciando...");
-      esp_restart();
-    }
-  }
-  otaConfirmationPending = false;
-}
-
-// -------------------------
-// Función para cancelar la OTA
-// -------------------------
-void cancelarOTA() {
-  Serial.println("Actualizacion OTA cancelada por el usuario.");
-  esp_ota_abort(ota_handle);
-  dfu_in_progress = false;
-  otaConfirmationPending = false;
-}
-
-// -------------------------
-// Clase para DFU OTA vía BLE con validación, alerta y decodificacion Base64
-// -------------------------
-class MyDFUCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic *pCharacteristic) {
-    std::string value = pCharacteristic->getValue();
-    if (value.empty()) return;
-
-    // Si viene un nombre de usuario (no inicia OTA)
-    if (!dfu_in_progress && value.find("SIG:") != 0 && value != "EOF") {
-      // Decodificar Base64
-      int maxDecodedSize = (value.size() * 3) / 4;
-      uint8_t *decodedBuffer = new uint8_t[maxDecodedSize];
-      int decodedLength = base64_decode(value, decodedBuffer, maxDecodedSize);
-      if (decodedLength < 0) {
-        Serial.println("Error decodificando Base64");
-      } else {
-        usuarioActual = String((char*)decodedBuffer, decodedLength);
-        prefs.begin("config", false);  // false = escritura
-        prefs.putString("user", usuarioActual);
-        prefs.end();
-
-        menuActivo = false;
-        Serial.print("Usuario recibido: ");
-        Serial.println(usuarioActual);
-      }
-      delete[] decodedBuffer;
-      return;
-    }
-
-    // --- Lógica OTA existente ---
-    if (!dfu_in_progress) {
-      update_partition = esp_ota_get_next_update_partition(NULL);
-      if (!update_partition) {
-        Serial.println("No hay particion OTA disponible");
-        return;
-      }
-      esp_err_t err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
-      if (err != ESP_OK) {
-        Serial.println("esp_ota_begin fallo");
-        return;
-      }
-      mbedtls_sha256_free(&sha256_ctx);
-      checksum_inicializado = false;
-      dfu_in_progress = true;
-      Serial.println("Actualizacion DFU iniciada");
-    }
-
-    if (value.substr(0, 4) == "SIG:") {
-      almacenarFirmaDigital(value.substr(4));
-      Serial.println("Firma digital recibida.");
-    }
-    else if (value == "EOF") {
-      otaConfirmationPending = true;
-      Serial.println("Esperando confirmacion del usuario para aplicar la actualizacion OTA.");
-    }
-    else {
-      int maxDecoded = (value.size() * 3) / 4;
-      uint8_t *buf = new uint8_t[maxDecoded];
-      int len = base64_decode(value, buf, maxDecoded);
-      if (len < 0) {
-        Serial.println("Error decodificando base64 OTA");
-      } else {
-        actualizarChecksum(buf, len);
-        esp_err_t err = esp_ota_write(ota_handle, buf, len);
-        if (err != ESP_OK) Serial.println("esp_ota_write fallo");
-        else {
-          Serial.print("Chunk OTA recibido, tamaño: ");
-          Serial.println(len);
-        }
-      }
-      delete[] buf;
-    }
-  }
-};
-
-// -------------------------
-// Configuración de DFU y BLE
-// -------------------------
-void setupDFU() {
-  NimBLEServer* pServer = NimBLEDevice::getServer();
-  if (!pServer) {
-    Serial.println("Servidor BLE no disponible para DFU");
-    return;
-  }
-  NimBLEService *pDFUService = pServer->createService(DFU_SERVICE_UUID);
-  NimBLECharacteristic *pDFUCharacteristic = pDFUService->createCharacteristic(
-      DFU_CHARACTERISTIC_UUID,
-      NIMBLE_PROPERTY::WRITE
-  );
-  pDFUCharacteristic->setCallbacks(new MyDFUCallbacks());
-  pDFUService->start();
-  NimBLEDevice::getAdvertising()->addServiceUUID(DFU_SERVICE_UUID);
-  Serial.println("Servicio DFU iniciado");
-}
-
-void setupBLE() {
-  Serial.println("Inicializando BLE...");
-  NimBLEDevice::init("");
-  NimBLEDevice::setDeviceName("ESP32-Altimetro-ota");
-  NimBLEServer *pServer = NimBLEDevice::createServer();
-  Serial.println("Servidor BLE creado");
-  NimBLEService *pService = pServer->createService(SERVICE_UUID);
-  Serial.println("Servicio principal BLE creado");
-  pCharacteristic = pService->createCharacteristic(
-    CHARACTERISTIC_UUID,
-    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY
-  );
-  pCharacteristic->setCallbacks(new MyDFUCallbacks());
-  Serial.println("Caracteristica principal BLE creada");
-  pService->start();
-  Serial.println("Servicio principal BLE iniciado");
-  setupDFU();
-  NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
-  NimBLEAdvertisementData advData;
-  advData.setName("ESP32-Altimetro-ota");
-  advData.setCompleteServices(pService->getUUID());
-  pAdvertising->setAdvertisementData(advData);
-  NimBLEAdvertisementData scanData;
-  scanData.setName("ESP32-Altimetro");
-  pAdvertising->setScanResponseData(scanData);
-  pAdvertising->start();
-  Serial.println("BLE advertising iniciado");
-}
-
-void toggleBLE() {
-  bleActivo = !bleActivo;
-  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-  if (!bleActivo) {
-    adv->stop();
-    Serial.println("BLE advertising stopped");
-  } else {
-    adv->start();
-    Serial.println("BLE advertising started");
-  }
-}
-
-// -------------------------
-// Función para mostrar la cuenta regresiva de 5 segundos
-// -------------------------
-void mostrarCuentaRegresiva() {
-  if (startupStartTime == 0) {
-    startupStartTime = millis();
-  }
-  unsigned long elapsed = millis() - startupStartTime;
-  int secondsLeft = 5 - (elapsed / 1000);
-  if (secondsLeft < 0) secondsLeft = 0;
-  
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_fub30_tr);
-  String cuenta = String(secondsLeft);
-  uint16_t strWidth = u8g2.getStrWidth(cuenta.c_str());
-  int xPos = (128 - strWidth) / 2;
-  int yPos = 40;
-  u8g2.setCursor(xPos, yPos);
-  u8g2.print(cuenta);
-  
-  // Mensaje adicional
-  u8g2.setFont(u8g2_font_ncenB08_tr);
-  u8g2.setCursor(10, 60);
-  u8g2.print("Calibrando...");
-  
-  u8g2.sendBuffer();
-  
-  if (elapsed >= startupCountdownTime) {
-    startupDone = true;
-  }
-  delay(100);
-}
-
-// -------------------------
-// Función para dibujar el menú con paginación
-// -------------------------
 void dibujarMenu() {
   int paginaActual = menuOpcion / OPCIONES_POR_PAGINA;
   int totalPaginas = (TOTAL_OPCIONES + OPCIONES_POR_PAGINA - 1) / OPCIONES_POR_PAGINA;
   int inicio = paginaActual * OPCIONES_POR_PAGINA;
   int fin = inicio + OPCIONES_POR_PAGINA;
   if (fin > TOTAL_OPCIONES) fin = TOTAL_OPCIONES;
-  
+
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_ncenB08_tr);
-  
-  // Encabezado
   u8g2.setCursor(0, 12);
   u8g2.print("MENU:");
   
-  // Dibujar cada opción en la página actual
   for (int i = inicio; i < fin; i++) {
-    int y = 24 + (i - inicio) * 12; // Separación vertical
-    // Mostrar indicador de selección
+    int y = 24 + (i - inicio) * 12;
+    u8g2.setCursor(0, y);
     if (i == menuOpcion) {
-      u8g2.setCursor(0, y);
       u8g2.print("> ");
     } else {
-      u8g2.setCursor(0, y);
       u8g2.print("  ");
     }
-    
-    // Mostrar el texto y valor de cada opción
     switch(i) {
       case 0:
         u8g2.print("Unidad: ");
@@ -558,15 +275,13 @@ void dibujarMenu() {
         if (ahorroTimeoutMs == 0)
           u8g2.print("OFF");
         else
-          u8g2.print(String(ahorroTimeoutMs/60000) + " min");
+          u8g2.print(String(ahorroTimeoutMs / 60000) + " min");
         break;
     }
   }
   
-  // Indicador de página y flechas si hay más opciones
   u8g2.setCursor(100, 63);
   u8g2.print(String(paginaActual + 1) + "/" + String(totalPaginas));
-  
   if (paginaActual > 0) {
     u8g2.setCursor(0, 63);
     u8g2.print("<");
@@ -575,12 +290,110 @@ void dibujarMenu() {
     u8g2.setCursor(120, 63);
     u8g2.print(">");
   }
-  
   u8g2.sendBuffer();
 }
 
+void mostrarCuentaRegresiva() {
+  if (startupStartTime == 0) {
+    startupStartTime = millis();
+  }
+  unsigned long elapsed = millis() - startupStartTime;
+  int secondsLeft = 5 - (elapsed / 1000);
+  if (secondsLeft < 0) secondsLeft = 0;
+  
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_fub30_tr);
+  String cuenta = String(secondsLeft);
+  uint16_t strWidth = u8g2.getStrWidth(cuenta.c_str());
+  int xPos = (128 - strWidth) / 2;
+  int yPos = 40;
+  u8g2.setCursor(xPos, yPos);
+  u8g2.print(cuenta);
+  
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  u8g2.setCursor(10, 60);
+  u8g2.print("Calibrando...");
+  u8g2.sendBuffer();
+  
+  if (elapsed >= startupCountdownTime) {
+    startupDone = true;
+  }
+  delay(100);
+}
+
 // -------------------------
-// SETUP
+// Configuración BLE con NimBLE (Altímetro, DFU OTA y Username)
+// -------------------------
+void setupBLE() {
+  Serial.println("Inicializando BLE con NimBLE...");
+  NimBLEDevice::init("ESP32-FIR");
+  NimBLEDevice::setSecurityAuth(false, false, false);
+  NimBLEServer *pServer = NimBLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+  
+  // Servicio principal para altímetro
+  Serial.println("Creando servicio principal BLE...");
+  NimBLEService *pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID,
+    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY
+  );
+  pService->start();
+  Serial.println("Servicio principal BLE iniciado");
+  
+  // Servicio DFU OTA para actualización
+  Serial.println("Creando servicio DFU OTA...");
+  NimBLEService *pDFUService = pServer->createService(DFU_SERVICE_UUID);
+  NimBLECharacteristic *pDFUCharacteristic = pDFUService->createCharacteristic(
+    DFU_CHARACTERISTIC_UUID,
+    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+  );
+  pDFUCharacteristic->setCallbacks(new DFUCallbacks());
+  pDFUService->start();
+  Serial.println("Servicio DFU OTA iniciado");
+  
+  // Servicio para actualización de usuario
+  Serial.println("Creando servicio de actualización de usuario...");
+  NimBLEService *pUsernameService = pServer->createService(USERNAME_SERVICE_UUID);
+  NimBLECharacteristic *pUsernameCharacteristic = pUsernameService->createCharacteristic(
+    USERNAME_CHARACTERISTIC_UUID,
+    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+  );
+  pUsernameCharacteristic->setCallbacks(new UsernameCallbacks());
+  pUsernameService->start();
+  Serial.println("Servicio de usuario iniciado");
+  
+  // Configuración de advertising:
+  NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
+  NimBLEAdvertisementData advData;
+  advData.setName("ESP32-FIR");
+  advData.addServiceUUID(SERVICE_UUID);
+  pAdvertising->setAdvertisementData(advData);
+  
+  NimBLEAdvertisementData scanData;
+  scanData.setName("ESP32-FIR");
+  scanData.addServiceUUID(DFU_SERVICE_UUID);
+  scanData.addServiceUUID(USERNAME_SERVICE_UUID);
+  pAdvertising->setScanResponseData(scanData);
+  
+  pAdvertising->start();
+  Serial.println("BLE advertising iniciado");
+}
+
+void toggleBLE() {
+  bleActivo = !bleActivo;
+  NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
+  if (!bleActivo) {
+    pAdvertising->stop();
+    Serial.println("BLE advertising stopped");
+  } else {
+    pAdvertising->start();
+    Serial.println("BLE advertising started");
+  }
+}
+
+// -------------------------
+// Setup
 // -------------------------
 void setup() {
   Serial.begin(115200);
@@ -589,8 +402,11 @@ void setup() {
   
   Wire.begin(SDA_PIN, SCL_PIN);
   
-  prefs.begin("config", true);  // true = solo lectura
-  usuarioActual = prefs.getString("user", "");
+  // Cargar configuración guardada (o usar valores por defecto)
+  loadConfig();
+  
+  prefs.begin("config", false);
+  usuarioActual = prefs.getString("user", "default_user");
   prefs.end();
   Serial.print("Usuario cargado desde NVS: ");
   Serial.println(usuarioActual);
@@ -598,8 +414,14 @@ void setup() {
   setupBLE();
   
   u8g2.begin();
-  // Se envía inicialmente el comando de inversión (0xA7)
-  u8g2.sendF("c", 0xA7);
+  // Se selecciona el modo de inversión según la configuración almacenada
+  if (inversionActiva) {
+    u8g2.sendF("c", 0xA7);
+    Serial.println("Display iniciado en modo invertido.");
+  } else {
+    u8g2.sendF("c", 0xA6);
+    Serial.println("Display iniciado en modo normal.");
+  }
   u8g2.setPowerSave(false);
   u8g2.setContrast(brilloPantalla);
   
@@ -619,16 +441,6 @@ void setup() {
   adc1_config_width(ADC_WIDTH_BIT_12);
   adc1_config_channel_atten(ADC1_CHANNEL_1, ADC_ATTEN_DB_12);
   
-  const esp_partition_t* running = esp_ota_get_running_partition();
-  esp_ota_img_states_t ota_state;
-  if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
-    if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-      Serial.println("Primer arranque del nuevo firmware. Marcándolo como válido.");
-      esp_ota_mark_app_valid_cancel_rollback();
-    }
-  }
-  
-  // Inicializar valores para ahorro (se usa la altitud actual)
   if (bmp.performReading()) {
     lastAltForAhorro = bmp.readAltitude(1013.25);
   }
@@ -638,43 +450,18 @@ void setup() {
 }
 
 // -------------------------
-// LOOP
+// Loop
 // -------------------------
 void loop() {
-  // Mostrar cuenta regresiva de estabilizacion al inicio
   if (!startupDone) {
     mostrarCuentaRegresiva();
     return;
   }
   
-  // Si hay una alerta pendiente de confirmacion OTA, se muestra y se gestionan los botones
-  if (otaConfirmationPending) {
-    dibujarAlertaOTA();
-    // Botón para alternar la opción (BUTTON_ALTITUDE)
-    if (digitalRead(BUTTON_ALTITUDE) == LOW) {
-      otaConfirmationOption = (otaConfirmationOption + 1) % 2; // 0 o 1
-      delay(200);
-    }
-    // Botón para confirmar la selección (BUTTON_OLED)
-    if (digitalRead(BUTTON_OLED) == LOW) {
-      if (otaConfirmationOption == 0) {
-        Serial.println("Usuario acepto la actualizacion OTA.");
-        finalizarOTA();
-      } else {
-        Serial.println("Usuario cancelo la actualizacion OTA.");
-        cancelarOTA();
-      }
-      delay(200);
-    }
-    return;
-  }
-  
-  // Leer sensor de altitud
   bool sensorOk = bmp.performReading();
   float altitudActual = sensorOk ? bmp.readAltitude(1013.25) : 0;
   
-  // Si no se está en el menú y el modo ahorro está configurado (timeout > 0),
-  // se verifica si la altitud ha cambiado significativamente
+  // Modo ahorro: verificar inactividad en la altitud
   if (!menuActivo && sensorOk && ahorroTimeoutMs > 0) {
     if (fabs(altitudActual - lastAltForAhorro) > ALT_CHANGE_THRESHOLD) {
       lastAltForAhorro = altitudActual;
@@ -683,7 +470,7 @@ void loop() {
       if ((millis() - lastAltChangeTime) >= ahorroTimeoutMs && pantallaEncendida) {
         u8g2.setPowerSave(true);
         pantallaEncendida = false;
-        Serial.println("Modo ahorro: Pantalla suspendida por inactividad de altitud.");
+        Serial.println("Modo ahorro: Pantalla suspendida por inactividad.");
       }
     }
   }
@@ -707,12 +494,12 @@ void loop() {
       menuOpcion = (menuOpcion + 1) % TOTAL_OPCIONES;
       if (menuOpcion != 3) batteryMenuActive = false;
       menuStartTime = millis();
-      Serial.print("Opcion del menu cambiada a: ");
+      Serial.print("Opción del menú cambiada a: ");
       switch (menuOpcion) {
         case 0: Serial.println("Unidad"); break;
         case 1: Serial.println("Brillo"); break;
         case 2: Serial.println("Formato Altura"); break;
-        case 3: Serial.println("Bateria"); break;
+        case 3: Serial.println("Batería"); break;
         case 4: Serial.println("BL"); break;
         case 5: Serial.println("Invertir"); break;
         case 6: Serial.println("Ahorro"); break;
@@ -726,12 +513,12 @@ void loop() {
   
   if (digitalRead(BUTTON_OLED) == LOW) {
     if (menuActivo) {
-      // Acciones según la opción seleccionada
       switch (menuOpcion) {
         case 0:
           unidadMetros = !unidadMetros;
           Serial.print("Unidad cambiada a: ");
           Serial.println(unidadMetros ? "metros" : "pies");
+          saveConfig();
           break;
         case 1:
           brilloPantalla += 50;
@@ -739,6 +526,7 @@ void loop() {
           u8g2.setContrast(brilloPantalla);
           Serial.print("Brillo cambiado a: ");
           Serial.println(brilloPantalla);
+          saveConfig();
           break;
         case 2:
           altFormat = (altFormat + 1) % 4;
@@ -749,36 +537,38 @@ void loop() {
             case 2: Serial.println("2 decimales"); break;
             case 3: Serial.println("3 decimales"); break;
           }
+          saveConfig();
           break;
         case 3:
           batteryMenuActive = !batteryMenuActive;
-          Serial.print("Vista Bateria en menu: ");
+          Serial.print("Vista Batería en menú: ");
           Serial.println(batteryMenuActive ? "ON" : "OFF");
           break;
         case 4:
           toggleBLE();
-          Serial.print("BLE ahora esta: ");
+          Serial.print("BLE ahora está: ");
           Serial.println(bleActivo ? "ON" : "OFF");
           break;
         case 5:
           inversionActiva = !inversionActiva;
           if (inversionActiva) {
-            u8g2.sendF("c", 0xA7);  // Comando para invertir display
-            Serial.println("Display invertido (colores invertidos).");
+            u8g2.sendF("c", 0xA7);
+            Serial.println("Display invertido.");
           } else {
-            u8g2.sendF("c", 0xA6);  // Comando para modo normal
+            u8g2.sendF("c", 0xA6);
             Serial.println("Display en modo normal.");
           }
+          saveConfig();
           break;
         case 6:
-          // Actualizar la opción de ahorro: ciclar entre tiempos predefinidos
           ahorroTimeoutOption = (ahorroTimeoutOption + 1) % NUM_TIMEOUT_OPTIONS;
           ahorroTimeoutMs = TIMEOUT_OPTIONS[ahorroTimeoutOption];
           Serial.print("Modo ahorro configurado a: ");
           if (ahorroTimeoutMs == 0)
             Serial.println("OFF");
           else
-            Serial.print(String(ahorroTimeoutMs/60000) + " min");
+            Serial.println(String(ahorroTimeoutMs / 60000) + " min");
+          saveConfig();
           break;
       }
       menuStartTime = millis();
@@ -790,7 +580,6 @@ void loop() {
       } else {
         u8g2.setPowerSave(false);
         pantallaEncendida = true;
-        // Reiniciamos el temporizador de ahorro y actualizamos la última altitud
         lastAltChangeTime = millis();
         if (bmp.performReading()) {
           lastAltForAhorro = bmp.readAltitude(1013.25);
@@ -804,12 +593,12 @@ void loop() {
   if (menuActivo && (millis() - menuStartTime > 7000)) {
     menuActivo = false;
     batteryMenuActive = false;
-    Serial.println("Menu cerrado por timeout.");
+    Serial.println("Menú cerrado por timeout.");
   }
   
   updateBatteryReading();
   
-  // Visualización y envío vía BLE
+  // Si estamos en menú, mostramos las opciones
   if (menuActivo) {
     if (batteryMenuActive) {
       if (pantallaEncendida) {
@@ -839,7 +628,6 @@ void loop() {
       }
     } else {
       if (pantallaEncendida) {
-        // Dibujar menú paginado
         dibujarMenu();
       }
     }
@@ -858,9 +646,10 @@ void loop() {
     int lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);
     float voltajeADC = (lecturaADC / 4095.0) * 2.6;
     float v_adc = voltajeADC;
-    float v_bat = v_adc * 2.0; // No se usa en el display; el porcentaje se obtiene de la lectura caché.
+    float v_bat = v_adc * 2.0;
     int porcentajeBateria = cachedBatteryPercentage;
   
+    // Actualizamos la característica principal (altímetro) con el valor de altitud
     pCharacteristic->setValue(altDisplay.c_str());
     pCharacteristic->notify();
   
@@ -891,24 +680,23 @@ void loop() {
       if (xPosAlt < 0) xPosAlt = 0;
       u8g2.setCursor(xPosAlt, yPosAlt);
       u8g2.print(altStr);
-      u8g2.drawHLine(0, 15, 128);
-      u8g2.drawHLine(0, 52, 128); 
-      u8g2.drawHLine(0, 0, 128);
-      u8g2.drawHLine(0, 63, 128); 
-      u8g2.drawVLine(0, 0, 64);
-      u8g2.drawVLine(127, 0, 64);
+      u8g2.drawHLine(0,15,128);
+      u8g2.drawHLine(0,52,128);
+      u8g2.drawHLine(0,0,128);
+      u8g2.drawHLine(0,63,128);
+      u8g2.drawVLine(0,0,64);
+      u8g2.drawVLine(127,0,64);
       
       u8g2.setFont(u8g2_font_ncenB08_tr);
       String user = usuarioActual;
-      uint16_t UserWidth = u8g2.getStrWidth(user.c_str());
-      int16_t xPosUser = (128 - UserWidth) / 2;
+      uint16_t userWidth = u8g2.getStrWidth(user.c_str());
+      int16_t xPosUser = (128 - userWidth) / 2;
       if (xPosUser < 0) xPosUser = 0;
-      u8g2.setCursor(xPosUser, 62);
+      u8g2.setCursor(xPosUser,62);
       u8g2.print(user);
       
       u8g2.sendBuffer();
-      
     }
   }
-  delay(100);
+  delay(101);
 }

@@ -75,7 +75,7 @@ const MainScreen = ({ setScreen }) => {
       setScanning(false);
       console.log('Conectando a:', device.name || device.localName);
       // Utilizamos scanAndConnect para que el provider actualice la conexión global
-      const connected = await scanAndConnect("ESP32-Altimetro-ota");
+      const connected = await scanAndConnect("ESP32-FIR");
       Alert.alert('Conectado', `Conectado a ${connected.name || connected.localName}`);
     } catch (error) {
       console.error('Error al conectar:', error);
