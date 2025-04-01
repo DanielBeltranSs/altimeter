@@ -10,9 +10,7 @@ extern int menuOpcion;
 extern bool menuActivo;
 extern bool pantallaEncendida;
 
-// Constantes para el menú
-extern const int TOTAL_OPCIONES;
-extern const int OPCIONES_POR_PAGINA;
+extern long lastMenuInteraction;
 
 // Funciones de la interfaz de usuario
 void initUI();

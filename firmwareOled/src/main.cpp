@@ -6,8 +6,7 @@
 #include "ui_module.h"
 
 // Variables globales para la UI y menú (pueden definirse en ui_module.cpp también)
-int menuOpcion = 0;
-bool menuActivo = false;
+
 bool pantallaEncendida = true;
 
 
@@ -40,33 +39,32 @@ void setup() {
 }
 
 void loop() {
-  // Actualizar datos del sensor (lectura del BMP390 y otros si se requieren)
   updateSensorData();
-  
-  // Actualizar la UI (puede mostrar menú, altitud, batería, etc.)
   updateUI();
-  
-  // Manejo básico de botones para el menú y otras funciones
-  if (digitalRead(BUTTON_MENU) == LOW) {
-    menuActivo = !menuActivo;
-    delay(50);
-  }
-  if (digitalRead(BUTTON_ALTITUDE) == LOW) {
-    if (menuActivo) {
-      menuOpcion = (menuOpcion + 1) % TOTAL_OPCIONES;
+
+  // Si el menú está activo, procesarlo
+  if (menuActivo) {
+    processMenu();
+  } else {
+    // Si no está activo el menú, manejar otros botones
+    if (digitalRead(BUTTON_MENU) == LOW) {
+      menuActivo = true;
+      menuOpcion = 0;
+      lastMenuInteraction = millis();
       delay(50);
-    } else {
-      // Por ejemplo, reiniciar altitud de referencia
+    }
+    if (digitalRead(BUTTON_ALTITUDE) == LOW) {
+      // En modo normal, por ejemplo, reiniciar altitud
       if (bmp.performReading()) {
         altitudReferencia = bmp.readAltitude(1013.25);
         Serial.println("Altitud reiniciada a cero.");
       }
       delay(50);
     }
-  }
-  if (digitalRead(BUTTON_OLED) == LOW) {
-    if (!menuActivo) {
+    if (digitalRead(BUTTON_OLED) == LOW) {
+      // Aquí se alterna el encendido/apagado de la pantalla si no hay menú activo
       pantallaEncendida = !pantallaEncendida;
+      lastAltChangeTime = millis();
       if (pantallaEncendida)
         u8g2.setPowerSave(false);
       else
@@ -74,10 +72,7 @@ void loop() {
       delay(50);
     }
   }
-  
+
   updateBatteryReading();
-  
-  // Aquí se podría actualizar la característica BLE con la altitud, etc.
-  
   delay(101);
 }

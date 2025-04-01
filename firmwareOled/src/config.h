@@ -37,6 +37,11 @@ extern String usuarioActual;
 extern bool bleActivo;              // BLE activo o no
 extern Preferences prefs;
 extern int cachedBatteryPercentage;
+extern const int TOTAL_OPCIONES;
+extern const int OPCIONES_POR_PAGINA;
+extern const int NUM_TIMEOUT_OPTIONS;
+extern const long TIMEOUT_OPTIONS[];
+
 // Funciones de configuración y manejo de NVS
 void loadConfig();
 void saveConfig();

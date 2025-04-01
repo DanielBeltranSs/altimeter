@@ -3,32 +3,35 @@
 #include "ble_module.h"  // Para toggleBLE(), si se usa en alguna opción
 #include <Arduino.h>
 #include <U8g2lib.h>
+#include "sensor_module.h"
 
 // Se instancia el objeto de la pantalla
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 bool startupDone = false;
 
-// Constantes para el menú
-const int TOTAL_OPCIONES = 7;
-const int OPCIONES_POR_PAGINA = 3;
+// Constantes para el menú (definidas en config.cpp para evitar definiciones múltiples)
+extern const int TOTAL_OPCIONES = 7;
+extern const int OPCIONES_POR_PAGINA = 4;
 
-// Declaraciones de variables externas de configuración
+
+// Variables globales para el menú
+int menuOpcion = 0;
+bool menuActivo = false;
+
+// Declaración de variables externas de configuración
 extern bool unidadMetros;
 extern int brilloPantalla;
 extern int altFormat;
 extern bool bleActivo;
 extern unsigned long ahorroTimeoutMs;
 extern int ahorroTimeoutOption;
-extern const unsigned long TIMEOUT_OPTIONS[];
 
-// Variables globales para el menú (se pueden definir también en main.cpp)
-int menuOpcion = 0;
-bool menuActivo = false;
-
-// Declaración de variables usadas en UI (por ejemplo, porcentaje de batería)
 
 // Se asume que cachedBatteryPercentage se define en sensor_module.cpp y es accesible
 extern int cachedBatteryPercentage;
+
+// Variable para el timeout del menú
+long lastMenuInteraction = 0;
 
 // Función para inicializar la UI
 void initUI() {
@@ -42,7 +45,7 @@ void mostrarCuentaRegresiva() {
   static unsigned long startupStartTime = 0;
   if (startupStartTime == 0) startupStartTime = millis();
   unsigned long elapsed = millis() - startupStartTime;
-  int secondsLeft = 5 - (elapsed / 1000);
+  int secondsLeft = 3 - (elapsed / 1000);
   if (secondsLeft < 0) secondsLeft = 0;
   
   u8g2.clearBuffer();
@@ -59,7 +62,7 @@ void mostrarCuentaRegresiva() {
   u8g2.print("Calibrando...");
   u8g2.sendBuffer();
   
-  if (elapsed >= 5000) startupDone = true;
+  if (elapsed >= 3000) startupDone = true;
   delay(100);
 }
 
@@ -180,7 +183,7 @@ static void ejecutarOpcionMenu(int opcion) {
       }
       break;
     case 6: // Cambiar modo ahorro
-      ahorroTimeoutOption = (ahorroTimeoutOption + 1) % 4;
+      ahorroTimeoutOption = (ahorroTimeoutOption + 1) % NUM_TIMEOUT_OPTIONS;
       ahorroTimeoutMs = TIMEOUT_OPTIONS[ahorroTimeoutOption];
       Serial.print("Modo ahorro configurado a: ");
       if (ahorroTimeoutMs == 0)
@@ -194,29 +197,38 @@ static void ejecutarOpcionMenu(int opcion) {
 
 // Función para procesar la navegación del menú
 void processMenu() {
-  // Si se presiona el botón ALTITUDE, cambiar la opción del menú
+  // Si se presiona BUTTON_MENU, se cierra el menú
+  if (digitalRead(BUTTON_MENU) == LOW) {
+    delay(50);  // debounce
+    menuActivo = false;
+    lastMenuInteraction = millis();
+    Serial.println("Menú cerrado.");
+    while (digitalRead(BUTTON_MENU) == LOW);
+    return;
+  }
+  
+  // Si se presiona BUTTON_ALTITUDE, cambiar de opción y actualizar el contador
   if (digitalRead(BUTTON_ALTITUDE) == LOW) {
-    delay(50); // Debounce
+    delay(50);
     menuOpcion = (menuOpcion + 1) % TOTAL_OPCIONES;
-    while (digitalRead(BUTTON_ALTITUDE) == LOW); // Esperar a soltar
+    lastMenuInteraction = millis();
     Serial.print("Opción del menú cambiada a: ");
     Serial.println(menuOpcion);
+    while (digitalRead(BUTTON_ALTITUDE) == LOW);
   }
   
-  // Si se presiona el botón MENU, se cierra el menú
-  if (digitalRead(BUTTON_MENU) == LOW) {
-    delay(50);
-    menuActivo = false;
-    while (digitalRead(BUTTON_MENU) == LOW);
-    Serial.println("Menú cerrado.");
-  }
-  
-  // Si se presiona el botón OLED, confirmar la opción seleccionada
+  // Si se presiona BUTTON_OLED, confirmar la opción y actualizar el contador
   if (digitalRead(BUTTON_OLED) == LOW) {
     delay(50);
     ejecutarOpcionMenu(menuOpcion);
+    lastMenuInteraction = millis();
     while (digitalRead(BUTTON_OLED) == LOW);
+  }
+  
+  // Si han pasado 7 segundos sin interacción, cerrar el menú
+  if (millis() - lastMenuInteraction > 7000) {
     menuActivo = false;
+    Serial.println("Menú cerrado por inactividad.");
   }
 }
 
@@ -249,13 +261,29 @@ void updateUI() {
     u8g2.setCursor(128 - batWidth - 2, 12);
     u8g2.print(batStr);
     
-    // Mostrar altitud (este ejemplo usa "123" como altitud; reemplaza por la variable real)
+   // Calcular la altitud corregida: se resta la altitud de referencia y se convierte si es necesario
+    float altActual = bmp.readAltitude(1013.25);
+    float altCalculada = altActual - altitudReferencia;
+    if (!unidadMetros) {
+      altCalculada *= 3.281;  // Convertir a pies
+    }
+    
+    String altDisplay;
+    if (altFormat == 0) {
+      altDisplay = String((long)altCalculada);
+    } else {
+      float altScaled = altCalculada * 0.001;
+      float altTrunc = floor(altScaled * pow(10, altFormat)) / pow(10, altFormat);
+      altDisplay = String(altTrunc, altFormat);
+    }
+    
+    // Mostrar la altitud en grande, centrada
     u8g2.setFont(u8g2_font_fub30_tr);
-    String altStr = "123";
-    int xPosAlt = (128 - u8g2.getStrWidth(altStr.c_str())) / 2;
+    int xPosAlt = (128 - u8g2.getStrWidth(altDisplay.c_str())) / 2;
     if (xPosAlt < 0) xPosAlt = 0;
     u8g2.setCursor(xPosAlt, 50);
-    u8g2.print(altStr);
+    u8g2.print(altDisplay);
+
     
     // Dibujar bordes (opcional)
     u8g2.drawHLine(0, 15, 128);
@@ -267,7 +295,7 @@ void updateUI() {
     
     // Mostrar usuario en la parte inferior, centrado
     u8g2.setFont(u8g2_font_ncenB08_tr);
-    String user = usuarioActual;
+    String user = "eldani";
     int xPosUser = (128 - u8g2.getStrWidth(user.c_str())) / 2;
     if (xPosUser < 0) xPosUser = 0;
     u8g2.setCursor(xPosUser, 62);

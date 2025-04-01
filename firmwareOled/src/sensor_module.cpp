@@ -1,10 +1,12 @@
 #include "sensor_module.h"
-#include "config.h"    // Para usar BMP_ADDR
+#include "config.h"       // Para usar BMP_ADDR
+#include "ui_module.h"    // Para acceder a: menuActivo, pantallaEncendida y u8g2
 #include <Arduino.h>
 #include <Wire.h>
 #include <driver/adc.h>
+#include <math.h>
 
-// Objeto para el sensor y variable de altitud
+// Definición del objeto sensor y variable de altitud
 Adafruit_BMP3XX bmp;
 float altitudReferencia = 0.0;
 
@@ -12,6 +14,12 @@ float altitudReferencia = 0.0;
 int cachedBatteryPercentage = 0;
 unsigned long lastBatteryUpdate = 0;
 const unsigned long batteryUpdateInterval = 5000; // 5 segundos
+
+// Variables para el modo ahorro basadas en altitud
+// Estas variables se usan para detectar cambios en la altitud y activar el ahorro si no hay cambios
+float lastAltForAhorro = 0;
+unsigned long lastAltChangeTime = 0;
+const float ALT_CHANGE_THRESHOLD = 1.0;  // Umbral (por ejemplo, 1 metro)
 
 void initSensor() {
   if (!bmp.begin_I2C(BMP_ADDR)) {
@@ -23,13 +31,29 @@ void initSensor() {
   bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_7);
   bmp.setOutputDataRate(BMP3_ODR_50_HZ);
   if (bmp.performReading()) {
-    altitudReferencia = bmp.readAltitude(1013.25);
+    lastAltForAhorro = bmp.readAltitude(1013.25);
   }
+  lastAltChangeTime = millis();
 }
 
 void updateSensorData() {
-  bmp.performReading();
-  // Aquí podrías procesar datos adicionales si es necesario.
+  bool sensorOk = bmp.performReading();
+  float altitudActual = sensorOk ? bmp.readAltitude(1013.25) : 0;
+  
+  // Si no estamos en el menú y se ha configurado el modo ahorro, comprobamos inactividad
+  // Se asume que 'menuActivo' y 'pantallaEncendida' están declarados como extern en ui_module.h
+  if (!menuActivo && sensorOk && ahorroTimeoutMs > 0) {
+    if (fabs(altitudActual - lastAltForAhorro) > ALT_CHANGE_THRESHOLD) {
+      lastAltForAhorro = altitudActual;
+      lastAltChangeTime = millis();
+    } else {
+      if ((millis() - lastAltChangeTime) >= ahorroTimeoutMs && pantallaEncendida) {
+        u8g2.setPowerSave(true);
+        pantallaEncendida = false;
+        Serial.println("Modo ahorro: Pantalla suspendida por inactividad.");
+      }
+    }
+  }
 }
 
 int calcularPorcentajeBateria(float voltaje) {

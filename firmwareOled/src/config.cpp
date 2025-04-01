@@ -2,19 +2,21 @@
 #include <Arduino.h>
 
 Preferences prefs;
-extern const int TOTAL_OPCIONES;
-extern const int OPCIONES_POR_PAGINA;
+
 // Inicialización de variables globales
 bool unidadMetros = false;
 int brilloPantalla = 255;
 int altFormat = 0;
 int ahorroTimeoutOption = 0;
-extern const unsigned long TIMEOUT_OPTIONS[] = {0, 60000, 120000, 300000};
+const long TIMEOUT_OPTIONS[] = {0, 60000, 120000, 300000};
 
 unsigned long ahorroTimeoutMs = TIMEOUT_OPTIONS[0];
 bool inversionActiva = true;
 String usuarioActual = "default_user";
 bool bleActivo = true;
+
+const int NUM_TIMEOUT_OPTIONS = 4;
+
 
 void loadConfig() {
   prefs.begin("config", false);
