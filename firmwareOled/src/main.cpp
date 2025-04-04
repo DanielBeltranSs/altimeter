@@ -34,14 +34,16 @@ void setup() {
   pinMode(BUTTON_MENU, INPUT_PULLUP);
   
   // Lectura inicial del sensor para fijar altitud de referencia (se realiza en initSensor)
-  
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(ADC1_CHANNEL_1, ADC_ATTEN_DB_12);
+
   Serial.println("Setup completado");
 }
 
 void loop() {
   updateSensorData();
   updateUI();
-
+  updateBatteryReading();
   // Si el menú está activo, procesarlo
   if (menuActivo) {
     processMenu();
@@ -73,6 +75,6 @@ void loop() {
     }
   }
 
-  updateBatteryReading();
+  
   delay(101);
 }

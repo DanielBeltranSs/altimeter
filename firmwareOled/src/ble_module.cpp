@@ -8,6 +8,7 @@
 // Variables globales
 bool deviceConnected = false;
 NimBLECharacteristic *pCharacteristic = nullptr;
+bool updateStarted = false;
 
 // Nota: Según la versión de NimBLE en ESP32-C3, la firma de onConnect/onDisconnect podría no incluir el segundo parámetro.
 class MyServerCallbacks: public NimBLEServerCallbacks {
@@ -23,44 +24,53 @@ class MyServerCallbacks: public NimBLEServerCallbacks {
     }
   };
 
-class DFUCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) override {
-    Serial.println("[DFU] onWrite llamado");
-    esp_task_wdt_reset();
-    std::string rxValue = pCharacteristic->getValue();
-    Serial.print("[DFU] Recibido chunk, tamaño: ");
-    Serial.println(rxValue.size());
-    
-    // Si se recibe el marcador EOF, finalizamos la actualización
-    if (rxValue == "EOF") {
-      Serial.println("[DFU] Marcador EOF recibido, finalizando actualización");
-      if (Update.end(true)) {
-        Serial.println("[DFU] Actualización completa. Reiniciando...");
-        ESP.restart();
-      } else {
-        Serial.println("[DFU] Error finalizando la actualización");
+  class DFUCallbacks : public NimBLECharacteristicCallbacks {
+    public:
+      DFUCallbacks() {
+        Serial.println("[DFU] DFUCallbacks instanciado");
       }
-      return;
-    }
-    
-    // Iniciar la actualización OTA (este ejemplo inicia sin esperar confirmación)
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-      Serial.println("[DFU] Update.begin() falló");
-      return;
-    }
-    // Procesar el chunk
-    size_t written = Update.write((uint8_t*)rxValue.data(), rxValue.length());
-    if (written != rxValue.length()) {
-      Serial.println("[DFU] Error escribiendo el chunk");
-    } else {
-      Serial.print("[DFU] Chunk escrito, longitud: ");
-      Serial.println(written);
-    }
-    delay(1);
-    yield();
-    esp_task_wdt_reset();
-  }
-};
+      void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) {
+        Serial.println("[DFU] onWrite llamado");
+        esp_task_wdt_reset();
+        std::string rxValue = pCharacteristic->getValue();
+        Serial.print("[DFU] Recibido chunk, tamaño: ");
+        Serial.println(rxValue.size());
+        
+        // Si se recibe el marcador EOF, finalizamos la actualización
+        if (rxValue == "EOF") {
+          Serial.println("[DFU] Marcador EOF recibido, finalizando actualización");
+          if (Update.end(true)) {
+            Serial.println("[DFU] Actualización completa. Reiniciando...");
+            ESP.restart();
+          } else {
+            Serial.println("[DFU] Error finalizando la actualización");
+          }
+          return;
+        }
+        
+        // Si la actualización aún no ha iniciado, iniciarla directamente
+        if (!updateStarted) {
+          Serial.println("[DFU] Iniciando actualización OTA...");
+          if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+            Serial.println("[DFU] Update.begin() falló");
+            return;
+          }
+          updateStarted = true;
+        }
+        
+        // Procesar el chunk (si ya se inició la actualización)
+        size_t written = Update.write((uint8_t*)rxValue.data(), rxValue.length());
+        if (written != rxValue.length()) {
+          Serial.println("[DFU] Error escribiendo el chunk");
+        } else {
+          Serial.print("[DFU] Chunk escrito, longitud: ");
+          Serial.println(written);
+        }
+        delay(1);
+        yield();
+        esp_task_wdt_reset();
+      }
+    };
 
 class UsernameCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) override {

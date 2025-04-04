@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include "sensor_module.h"
+#include <driver/adc.h>
 
 // Se instancia el objeto de la pantalla
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
@@ -13,10 +14,10 @@ bool startupDone = false;
 extern const int TOTAL_OPCIONES = 7;
 extern const int OPCIONES_POR_PAGINA = 4;
 
-
 // Variables globales para el menú
 int menuOpcion = 0;
 bool menuActivo = false;
+bool batteryMenuActive = false; // Variable para activar el battery menu
 
 // Declaración de variables externas de configuración
 extern bool unidadMetros;
@@ -25,7 +26,6 @@ extern int altFormat;
 extern bool bleActivo;
 extern unsigned long ahorroTimeoutMs;
 extern int ahorroTimeoutOption;
-
 
 // Se asume que cachedBatteryPercentage se define en sensor_module.cpp y es accesible
 extern int cachedBatteryPercentage;
@@ -114,6 +114,8 @@ void dibujarMenu() {
         break;
       case 5:
         u8g2.print("Invertir: ");
+        // Se asume que inversionActiva está definida externamente
+        extern bool inversionActiva;
         u8g2.print(inversionActiva ? "ON" : "OFF");
         break;
       case 6:
@@ -164,8 +166,10 @@ static void ejecutarOpcionMenu(int opcion) {
         case 3: Serial.println("3 decimales"); break;
       }
       break;
-    case 3: // Acción para batería (puede quedar sin acción)
-      Serial.println("Opción Batería seleccionada.");
+    case 3: // Activar/desactivar vista de batería
+      batteryMenuActive = !batteryMenuActive;
+      Serial.print("Battery menu ahora: ");
+      Serial.println(batteryMenuActive ? "ON" : "OFF");
       break;
     case 4: // Alternar BLE
       toggleBLE();
@@ -173,6 +177,7 @@ static void ejecutarOpcionMenu(int opcion) {
       Serial.println(bleActivo ? "ON" : "OFF");
       break;
     case 5: // Cambiar modo de inversión
+      extern bool inversionActiva;
       inversionActiva = !inversionActiva;
       if (inversionActiva) {
         u8g2.sendF("c", 0xA7);
@@ -261,7 +266,7 @@ void updateUI() {
     u8g2.setCursor(128 - batWidth - 2, 12);
     u8g2.print(batStr);
     
-   // Calcular la altitud corregida: se resta la altitud de referencia y se convierte si es necesario
+    // Calcular la altitud corregida: se resta la altitud de referencia y se convierte si es necesario
     float altActual = bmp.readAltitude(1013.25);
     float altCalculada = altActual - altitudReferencia;
     if (!unidadMetros) {
@@ -283,7 +288,6 @@ void updateUI() {
     if (xPosAlt < 0) xPosAlt = 0;
     u8g2.setCursor(xPosAlt, 50);
     u8g2.print(altDisplay);
-
     
     // Dibujar bordes (opcional)
     u8g2.drawHLine(0, 15, 128);
@@ -295,16 +299,67 @@ void updateUI() {
     
     // Mostrar usuario en la parte inferior, centrado
     u8g2.setFont(u8g2_font_ncenB08_tr);
-    String user = "eldani";
+    String user = usuarioActual;
     int xPosUser = (128 - u8g2.getStrWidth(user.c_str())) / 2;
     if (xPosUser < 0) xPosUser = 0;
     u8g2.setCursor(xPosUser, 62);
     u8g2.print(user);
     
+// Mostrar indicador de "en salto" (bola en la esquina inferior izquierda)
+extern bool enSalto;
+extern bool ultraPreciso;
+
+if (enSalto) {
+  if (ultraPreciso) {
+    // Dibuja una bola hueca (círculo vacío) cuando está en modo precisión
+    u8g2.drawDisc(14, 58, 4);
+  } else {
+    // Dibuja una bola rellena cuando no está en modo precisión
+    u8g2.drawCircle(14, 58, 4);
+  }
+}
+
+
     u8g2.sendBuffer();
   }
   else {
-    // Si el menú está activo, dibujar el menú
-    dibujarMenu();
+    // Si el menú está activo, verificar si se debe mostrar la pantalla de batería
+    if (batteryMenuActive) {
+      if (pantallaEncendida) {
+        int lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);
+        float voltajeADC = (lecturaADC / 4095.0) * 2.6;
+        float factorCorreccion = 1.2;
+        float v_adc = voltajeADC;
+        float v_bat = v_adc * 2.0 * factorCorreccion;
+        u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_ncenB08_tr);
+        u8g2.setCursor(0,12);
+        u8g2.print("BATERIA:");
+        u8g2.setCursor(0,26);
+        u8g2.print("ADC: ");
+        u8g2.setCursor(50,26);
+        u8g2.print(lecturaADC);
+        u8g2.setCursor(0,40);
+        u8g2.print("V_ADC: ");
+        u8g2.setCursor(50,40);
+        u8g2.print(v_adc,2);
+        u8g2.print("V");
+        u8g2.setCursor(0,54);
+        u8g2.print("V_Bat: ");
+        u8g2.setCursor(50,54);
+        u8g2.print(v_bat,2);
+        u8g2.sendBuffer();
+        if (digitalRead(BUTTON_OLED) == LOW) {
+          delay(50);
+          batteryMenuActive = false;
+          lastMenuInteraction = millis();
+          Serial.println("Battery menu cerrado.");
+          while (digitalRead(BUTTON_OLED) == LOW);
+        }
+      }
+    } else {
+      // Mostrar menú normal
+      dibujarMenu();
+    }
   }
 }
