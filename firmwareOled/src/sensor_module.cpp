@@ -5,6 +5,9 @@
 #include <Wire.h>
 #include <driver/adc.h>
 #include <math.h>
+#include <Preferences.h>
+#include "ble_module.h"
+
 
 // Definición del objeto sensor y variable de altitud
 Adafruit_BMP3XX bmp;
@@ -15,12 +18,12 @@ float altitud = 0.0;
 // Variables para la batería
 int cachedBatteryPercentage = 0;
 unsigned long lastBatteryUpdate = 0;
-const unsigned long batteryUpdateInterval = 5000; // 5 segundos
+const unsigned long batteryUpdateInterval = 60000; // 60 segundos
 
 // Variables para el modo ahorro basadas en altitud
 float lastAltForAhorro = 0;
 unsigned long lastAltChangeTime = 0;
-const float ALT_CHANGE_THRESHOLD = 1.0;  // Umbral en metros
+const float ALT_CHANGE_THRESHOLD = 2.0;  // Umbral en metros
 
 // Variables para lectura de batería
 int lecturaADC = 0;
@@ -31,6 +34,9 @@ float v_bat = 0.0;
 // NUEVAS VARIABLES PARA DETECCIÓN DEL SALTO
 bool enSalto = false;
 bool ultraPreciso = false;
+
+static Preferences prefsSaltos;
+uint32_t jumpCount = 0;
 
 // Inicialización del sensor
 void initSensor() {
@@ -46,6 +52,11 @@ void initSensor() {
     lastAltForAhorro = altitudReferencia;
   }
   lastAltChangeTime = millis();
+  
+  // Inicializar el contador de saltos leyendo de NVS; si no existe se usa 0
+  prefsSaltos.begin("saltos", false);
+  jumpCount = prefsSaltos.getUInt("jumpCount", 0);
+  prefsSaltos.end();
 }
 
 // Función para actualizar los datos del sensor
@@ -54,7 +65,7 @@ void updateSensorData() {
   // Altitud absoluta del sensor (en metros)
   float altActual = sensorOk ? bmp.readAltitude(1013.25) : altitud;
   altitud = altActual;
-  // Altitud relativa (en metros) = lectura actual - referencia (0 antes del vuelo)
+  // Altitud relativa (en metros) = lectura actual - referencia (0 antes del vuelo)d
   altCalculada = altActual - altitudReferencia;
   
   // Convertir la altitud relativa a pies para detección (1 m = 3.281 ft)
@@ -64,9 +75,14 @@ void updateSensorData() {
   if (!enSalto && altEnPies > 60) {
     enSalto = true;
     Serial.println("¡Salto iniciado! (Altitud > 60 ft)");
+     // Incrementar el contador de saltos y guardarlo en NVS
+     jumpCount++;
+     prefsSaltos.begin("saltos", false);
+     prefsSaltos.putUInt("jumpCount", jumpCount);
+     prefsSaltos.end();
   }
-  // Activar modo ultra preciso al superar 12,000 ft
-  if (enSalto && !ultraPreciso && altEnPies > 12000) {
+  // Activar modo ultra preciso al superar 1,000 ft
+  if (enSalto && !ultraPreciso && altEnPies > 1000) {
     ultraPreciso = true;
     // Reconfiguración para máxima precisión:
     bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_16X);   // Máximo oversampling para temperatura
@@ -94,6 +110,12 @@ void updateSensorData() {
     if (fabs(altActual - lastAltForAhorro) > ALT_CHANGE_THRESHOLD) {
       lastAltForAhorro = altActual;
       lastAltChangeTime = millis();
+      // Si la pantalla estaba suspendida, reactivarla automáticamente.
+      if (!pantallaEncendida) {
+        u8g2.setPowerSave(false);
+        pantallaEncendida = true;
+        Serial.println("Pantalla reactivada automáticamente: cambio significativo detectado.");
+      }
     } else {
       if ((millis() - lastAltChangeTime) >= ahorroTimeoutMs && pantallaEncendida) {
         u8g2.setPowerSave(true);
@@ -101,6 +123,14 @@ void updateSensorData() {
         Serial.println("Modo ahorro: Pantalla suspendida por inactividad.");
       }
     }
+  }
+  if (pCharacteristic != nullptr) {
+    long altInt = (long) altEnPies;
+    String altStr = String(altInt);
+    pCharacteristic->setValue(altStr.c_str());
+    pCharacteristic->notify();
+  } else {
+    Serial.println("pCharacteristic es null");
   }
 }
 
@@ -120,7 +150,7 @@ int calcularPorcentajeBateria(float voltaje) {
 
 // Función para actualizar la lectura de la batería
 void updateBatteryReading() {
-  if (millis() - lastBatteryUpdate >= batteryUpdateInterval) {
+  if (lastBatteryUpdate == 0 || (millis() - lastBatteryUpdate >= batteryUpdateInterval)) {
     lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);
     voltajeADC = (lecturaADC / 4095.0) * 2.6;
     float factorCorreccion = 1.2;

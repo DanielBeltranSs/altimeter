@@ -11,18 +11,24 @@ NimBLECharacteristic *pCharacteristic = nullptr;
 bool updateStarted = false;
 
 // Nota: Según la versión de NimBLE en ESP32-C3, la firma de onConnect/onDisconnect podría no incluir el segundo parámetro.
-class MyServerCallbacks: public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer* pServer, ble_gap_conn_desc* desc) { 
-      deviceConnected = true;
-      Serial.println("[BLE] Cliente conectado");
-    }
-    void onDisconnect(NimBLEServer* pServer, ble_gap_conn_desc* desc) { 
-      deviceConnected = false;
-      Serial.println("[BLE] Cliente desconectado");
-      pServer->getAdvertising()->start();
-      Serial.println("[BLE] Publicidad reiniciada");
-    }
-  };
+class MyServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
+    deviceConnected = true;
+    Serial.println("[BLE] Cliente conectado");
+  }
+  void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
+    deviceConnected = false;
+    Serial.println("[BLE] Cliente desconectado");
+    // Se recomienda evitar operaciones bloqueantes en este callback.
+    // En lugar de utilizar delay(), se puede iniciar la publicidad de forma inmediata:
+    NimBLEDevice::startAdvertising();
+    Serial.println("[BLE] Publicidad reiniciada");
+  }
+  // Se pueden agregar los demás callbacks siguiendo la documentación.
+};
+
+
+
 
   class DFUCallbacks : public NimBLECharacteristicCallbacks {
     public:

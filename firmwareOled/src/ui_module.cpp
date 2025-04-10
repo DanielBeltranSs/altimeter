@@ -5,6 +5,7 @@
 #include <U8g2lib.h>
 #include "sensor_module.h"
 #include <driver/adc.h>
+#include <math.h>   // Para fabs()
 
 // Se instancia el objeto de la pantalla
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
@@ -38,6 +39,13 @@ void initUI() {
   u8g2.begin();
   u8g2.setPowerSave(false);
   u8g2.setContrast(brilloPantalla);
+  if (inversionActiva) {
+    u8g2.sendF("c", 0xA7);
+    Serial.println("Display iniciado en modo invertido.");
+  } else {
+    u8g2.sendF("c", 0xA6);
+    Serial.println("Display iniciado en modo normal.");
+  }
 }
 
 // Función para mostrar la cuenta regresiva de startup
@@ -266,20 +274,32 @@ void updateUI() {
     u8g2.setCursor(128 - batWidth - 2, 12);
     u8g2.print(batStr);
     
-    // Calcular la altitud corregida: se resta la altitud de referencia y se convierte si es necesario
+    // Calcular la altitud real y la altitud relativa (sin alterar la lectura real)
     float altActual = bmp.readAltitude(1013.25);
+    //float altCalculada = altActual - altitudReferencia;
     float altCalculada = altActual - altitudReferencia;
+
+    // Si se requiere trabajar en pies, se realiza la conversión
     if (!unidadMetros) {
-      altCalculada *= 3.281;  // Convertir a pies
+      altCalculada *= 3.281;
     }
     
+    // Determinar el string a mostrar según el formato configurado.
+    // Si la altitud (en la unidad usada) es menor en valor absoluto que el umbral,
+    // se mostrará "0"; de lo contrario se mostrará el valor real.
     String altDisplay;
-    if (altFormat == 0) {
-      altDisplay = String((long)altCalculada);
-    } else {
-      float altScaled = altCalculada * 0.001;
-      float altTrunc = floor(altScaled * pow(10, altFormat)) / pow(10, altFormat);
-      altDisplay = String(altTrunc, altFormat);
+    float umbral = unidadMetros ? 6.1 : 20.0;
+    if (fabs(altCalculada) < umbral) {
+      altDisplay = "0";
+    } 
+    else {
+      if (altFormat == 0) {
+        altDisplay = String((long)altCalculada);
+      } else {
+        float altScaled = altCalculada * 0.001;
+        float altTrunc = floor(altScaled * pow(10, altFormat)) / pow(10, altFormat);
+        altDisplay = String(altTrunc, altFormat);
+      }
     }
     
     // Mostrar la altitud en grande, centrada
@@ -305,25 +325,29 @@ void updateUI() {
     u8g2.setCursor(xPosUser, 62);
     u8g2.print(user);
     
-// Mostrar indicador de "en salto" (bola en la esquina inferior izquierda)
-extern bool enSalto;
-extern bool ultraPreciso;
+    String jumpStr = String(jumpCount);
+    int xPosJump = 128 - u8g2.getStrWidth(jumpStr.c_str()) - 14; // margen de 2 píxeles
+    int yPosJump = 62; // Puedes ajustar verticalmente según convenga
+    u8g2.setCursor(xPosJump, yPosJump);
+    u8g2.print(jumpStr);
 
-if (enSalto) {
-  if (ultraPreciso) {
-    // Dibuja una bola hueca (círculo vacío) cuando está en modo precisión
-    u8g2.drawDisc(14, 58, 4);
-  } else {
-    // Dibuja una bola rellena cuando no está en modo precisión
-    u8g2.drawCircle(14, 58, 4);
-  }
-}
-
-
+    // Mostrar indicador de "en salto" (bola en la esquina inferior izquierda)
+    extern bool enSalto;
+    extern bool ultraPreciso;
+    if (enSalto) {
+      if (ultraPreciso) {
+        // Dibuja una bola hueca (círculo vacío) cuando está en modo precisión
+        u8g2.drawDisc(14, 58, 4);
+      } else {
+        // Dibuja una bola rellena cuando no está en modo precisión
+        u8g2.drawCircle(14, 58, 4);
+      }
+    }
+    
     u8g2.sendBuffer();
   }
   else {
-    // Si el menú está activo, verificar si se debe mostrar la pantalla de batería
+    // Si el menú está activo, mostrar la pantalla de batería o el menú normal
     if (batteryMenuActive) {
       if (pantallaEncendida) {
         int lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);

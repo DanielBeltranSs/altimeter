@@ -5,10 +5,11 @@
 #include "sensor_module.h"
 #include "ui_module.h"
 
-// Variables globales para la UI y menú (pueden definirse en ui_module.cpp también)
-
+// Variables globales para la UI y menú
 bool pantallaEncendida = true;
 
+// Variable para la calibración automática al inicio
+bool calibracionRealizada = false;
 
 void setup() {
   Serial.begin(115200);
@@ -33,10 +34,10 @@ void setup() {
   pinMode(BUTTON_OLED, INPUT_PULLUP);
   pinMode(BUTTON_MENU, INPUT_PULLUP);
   
-  // Lectura inicial del sensor para fijar altitud de referencia (se realiza en initSensor)
+  // Configuración del ADC para lectura de batería
   adc1_config_width(ADC_WIDTH_BIT_12);
   adc1_config_channel_atten(ADC1_CHANNEL_1, ADC_ATTEN_DB_12);
-
+  
   Serial.println("Setup completado");
 }
 
@@ -44,37 +45,69 @@ void loop() {
   updateSensorData();
   updateUI();
   updateBatteryReading();
-  // Si el menú está activo, procesarlo
+  
+  // Calibración automática al inicio (se realiza solo una vez)
+  if (!calibracionRealizada) {
+    if (bmp.performReading()) {
+      altitudReferencia = bmp.readAltitude(1013.25);
+      Serial.println("Calibración inicial: altitud reiniciada a cero.");
+    } else {
+      Serial.println("Error al leer sensor en calibración inicial.");
+    }
+    calibracionRealizada = true;
+  }
+  
+  // Procesar menú si está activo
   if (menuActivo) {
     processMenu();
   } else {
-    // Si no está activo el menú, manejar otros botones
+    // Manejar botón MENU para activar el menú
     if (digitalRead(BUTTON_MENU) == LOW) {
       menuActivo = true;
       menuOpcion = 0;
       lastMenuInteraction = millis();
       delay(50);
     }
+    
+    // Procesar botón ALTITUDE para recalibración: se requiere mantenerlo presionado 3 segundos
     if (digitalRead(BUTTON_ALTITUDE) == LOW) {
-      // En modo normal, por ejemplo, reiniciar altitud
-      if (bmp.performReading()) {
-        altitudReferencia = bmp.readAltitude(1013.25);
-        Serial.println("Altitud reiniciada a cero.");
+      unsigned long startTime = millis();
+      // Espera mientras se mantiene presionado el botón
+      while(digitalRead(BUTTON_ALTITUDE) == LOW) {
+        if (millis() - startTime >= 1000) {  // Si se mantiene por 2 segundos o más
+          if (bmp.performReading()) {
+            altitudReferencia = bmp.readAltitude(1013.25);
+            Serial.println("Altitud reiniciada a cero por botón tras 3 segundos.");
+          } else {
+            Serial.println("Error al leer sensor en recalibración manual.");
+          }
+          // Esperar a que se libere el botón para evitar múltiples activaciones
+          while(digitalRead(BUTTON_ALTITUDE) == LOW) {
+            delay(10);
+          }
+          delay(50);
+          break;
+        }
+      }
+    }
+    
+    // Manejar botón OLED para alternar encendido/apagado de la pantalla (acción inmediata)
+    if (digitalRead(BUTTON_OLED) == LOW) {
+      pantallaEncendida = !pantallaEncendida;
+      lastAltChangeTime = millis();
+      if (pantallaEncendida) {
+        u8g2.setPowerSave(false);
+      } else {
+        u8g2.setPowerSave(true);
+      }
+      Serial.println("Pantalla alternada por botón OLED.");
+      // Esperar a que se libere el botón
+      while(digitalRead(BUTTON_OLED) == LOW) {
+        delay(10);
       }
       delay(50);
     }
-    if (digitalRead(BUTTON_OLED) == LOW) {
-      // Aquí se alterna el encendido/apagado de la pantalla si no hay menú activo
-      pantallaEncendida = !pantallaEncendida;
-      lastAltChangeTime = millis();
-      if (pantallaEncendida)
-        u8g2.setPowerSave(false);
-      else
-        u8g2.setPowerSave(true);
-      delay(50);
-    }
   }
-
   
   delay(101);
 }

@@ -1,4 +1,4 @@
-// App.js
+// App.js (o App.jsx)
 import React, { useState, useContext, useEffect } from 'react';
 import { 
   View, 
@@ -15,6 +15,7 @@ import {
 import { BleProvider, BleContext } from './BleProvider';
 import UpdateUsername from './UpdateUsername';
 import FirmwareUpdate from './FirmwareUpdate';
+import AltitudeDisplay from './AltitudeDisplay'; // Importamos el componente de altitud
 
 const MainScreen = ({ setScreen }) => {
   const { bleManager, connectedDevice, scanAndConnect, disconnect } = useContext(BleContext);
@@ -40,7 +41,6 @@ const MainScreen = ({ setScreen }) => {
 
   useEffect(() => {
     requestPermissions();
-    // No destruimos el bleManager acá ya que se gestiona en el provider
   }, []);
 
   // Escanear dispositivos BLE y mostrarlos en lista
@@ -90,6 +90,10 @@ const MainScreen = ({ setScreen }) => {
       <Text style={styles.status}>
         {connectedDevice ? `Conectado: ${connectedDevice.name || connectedDevice.localName}` : 'Desconectado'}
       </Text>
+      {connectedDevice && (
+        // Se muestra el componente de altitud cuando hay un dispositivo conectado
+        <AltitudeDisplay />
+      )}
       {!connectedDevice ? (
         <>
           <Button title="Escanear Dispositivos" onPress={scanForDevices} disabled={scanning || connecting} />

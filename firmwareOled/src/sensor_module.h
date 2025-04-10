@@ -25,7 +25,7 @@ extern float v_bat;
 
 extern bool enSalto;         // Indica si se está en salto (altitud > 60 ft)
 extern bool ultraPreciso;    // Indica si se activa el modo ultra preciso (altitud > 12,000 ft)
-
+extern uint32_t jumpCount;
 
 // Funciones para inicializar y actualizar el sensor y la batería
 void initSensor();
