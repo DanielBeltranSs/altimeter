@@ -4,12 +4,16 @@
 #include "ble_module.h"
 #include "sensor_module.h"
 #include "ui_module.h"
+#include "buzzer_module.h"
+
 
 // Variables globales para la UI y menú
 bool pantallaEncendida = true;
 
 // Variable para la calibración automática al inicio
 bool calibracionRealizada = false;
+
+
 
 void setup() {
   Serial.begin(115200);
@@ -25,6 +29,8 @@ void setup() {
   loadConfig();
   loadUserConfig();
   
+  initBuzzer();
+
   setupBLE();
   initUI();
   initSensor();
@@ -78,6 +84,7 @@ void loop() {
           if (bmp.performReading()) {
             altitudReferencia = bmp.readAltitude(1013.25);
             Serial.println("Altitud reiniciada a cero por botón tras 3 segundos.");
+            buzzerBeep(2000, 240, 1000); // Sonido de confirmación
           } else {
             Serial.println("Error al leer sensor en recalibración manual.");
           }

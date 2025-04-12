@@ -4,6 +4,7 @@
 #include <Adafruit_BMP3XX.h>
 #include <driver/adc.h>
 
+
 // Objeto para el sensor BMP390 y altitud de referencia
 extern Adafruit_BMP3XX bmp;
 extern float altitudReferencia;

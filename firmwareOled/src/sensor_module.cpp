@@ -8,7 +8,7 @@
 #include <Preferences.h>
 #include "ble_module.h"
 
-
+extern bool calibracionRealizada;
 // Definición del objeto sensor y variable de altitud
 Adafruit_BMP3XX bmp;
 float altitudReferencia = 0.0;
@@ -68,19 +68,34 @@ void updateSensorData() {
   // Altitud relativa (en metros) = lectura actual - referencia (0 antes del vuelo)d
   altCalculada = altActual - altitudReferencia;
   
-  // Convertir la altitud relativa a pies para detección (1 m = 3.281 ft)
-  float altEnPies = altCalculada * 3.281;
-  
-  // Detectar inicio del salto: si se supera 60 ft
+// Convertir la altitud relativa a pies (1 m = 3.281 ft)
+float altEnPies = altCalculada * 3.281;
+
+// Solo se evalúa el inicio y fin de salto si ya se completó la calibración
+if (calibracionRealizada) {
+  // Inicia el salto al superar 60 ft
   if (!enSalto && altEnPies > 60) {
     enSalto = true;
     Serial.println("¡Salto iniciado! (Altitud > 60 ft)");
-     // Incrementar el contador de saltos y guardarlo en NVS
-     jumpCount++;
-     prefsSaltos.begin("saltos", false);
-     prefsSaltos.putUInt("jumpCount", jumpCount);
-     prefsSaltos.end();
+    // Incrementar el contador de saltos y guardarlo en NVS
+    jumpCount++;
+    prefsSaltos.begin("saltos", false);
+    prefsSaltos.putUInt("jumpCount", jumpCount);
+    prefsSaltos.end();
   }
+  // Termina el salto al descender por debajo de 60 ft
+  if (enSalto && altEnPies < 60) {
+    enSalto = false;
+    ultraPreciso = false;
+    // Reconfiguración del sensor a modo normal:
+    bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_2X);
+    bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+    bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+    bmp.setOutputDataRate(BMP3_ODR_25_HZ);
+    Serial.println("Fin del salto (Altitud < 60 ft), modo normal activado.");
+  }
+}
+
   // Activar modo ultra preciso al superar 1,000 ft
   if (enSalto && !ultraPreciso && altEnPies > 1000) {
     ultraPreciso = true;
@@ -92,19 +107,6 @@ void updateSensorData() {
     Serial.println("Modo ultra preciso activado (Altitud > 12,000 ft)");
 }
 
-  // Al descender por debajo de 60 ft, se termina el salto
-  if (enSalto && altEnPies < 60) {
-    enSalto = false;
-    ultraPreciso = false;
-    // Reconfigurar el sensor a modo normal:
-    bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_2X);
-    bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
-    bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
-    bmp.setOutputDataRate(BMP3_ODR_25_HZ);
-    Serial.println("Fin del salto (Altitud < 60 ft), modo normal activado.");
-}
-
-  
   // (Opcional) Actualización para modo ahorro en periodos de inactividad, etc.
   if (!menuActivo && sensorOk && ahorroTimeoutMs > 0) {
     if (fabs(altActual - lastAltForAhorro) > ALT_CHANGE_THRESHOLD) {

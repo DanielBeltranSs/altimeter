@@ -6,6 +6,7 @@
 #include "sensor_module.h"
 #include <driver/adc.h>
 #include <math.h>   // Para fabs()
+#include "buzzer_module.h"
 
 // Se instancia el objeto de la pantalla
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
@@ -71,6 +72,7 @@ void mostrarCuentaRegresiva() {
   u8g2.sendBuffer();
   
   if (elapsed >= 3000) startupDone = true;
+  buzzerBeep(2000, 240, 1000);
   delay(100);
 }
 
