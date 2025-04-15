@@ -7,29 +7,35 @@
 #include <driver/adc.h>
 #include <math.h>   // Para fabs()
 #include "buzzer_module.h"
+#include "snake.h"
 
 // Se instancia el objeto de la pantalla
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 bool startupDone = false;
 
-// Constantes para el menú (definidas en config.cpp para evitar definiciones múltiples)
-extern const int TOTAL_OPCIONES = 7;
-extern const int OPCIONES_POR_PAGINA = 4;
+// Constantes para el menú
+const int TOTAL_OPCIONES = 9;
+const int OPCIONES_POR_PAGINA = 4;
+
+// Variables para el modo edición de offset
+bool editingOffset = false;
+float offsetTemp = 0.0;  // Valor temporal para el offset mientras se edita
 
 // Variables globales para el menú
 int menuOpcion = 0;
 bool menuActivo = false;
-bool batteryMenuActive = false; // Variable para activar el battery menu
+bool batteryMenuActive = false; // Para el menú de batería
 
-// Declaración de variables externas de configuración
+// Declaración de variables externas de configuración (definidas en config.cpp)
 extern bool unidadMetros;
 extern int brilloPantalla;
 extern int altFormat;
 extern bool bleActivo;
 extern unsigned long ahorroTimeoutMs;
 extern int ahorroTimeoutOption;
+extern float alturaOffset; // Offset de altitud en metros
 
-// Se asume que cachedBatteryPercentage se define en sensor_module.cpp y es accesible
+// Se asume que cachedBatteryPercentage se define en sensor_module.cpp
 extern int cachedBatteryPercentage;
 
 // Variable para el timeout del menú
@@ -40,6 +46,7 @@ void initUI() {
   u8g2.begin();
   u8g2.setPowerSave(false);
   u8g2.setContrast(brilloPantalla);
+  extern bool inversionActiva;
   if (inversionActiva) {
     u8g2.sendF("c", 0xA7);
     Serial.println("Display iniciado en modo invertido.");
@@ -72,11 +79,12 @@ void mostrarCuentaRegresiva() {
   u8g2.sendBuffer();
   
   if (elapsed >= 3000) startupDone = true;
+  // Beep de 1 segundo al finalizar la configuración inicial
   buzzerBeep(2000, 240, 1000);
   delay(100);
 }
 
-// Función para dibujar el menú en pantalla
+// Función para dibujar el menú principal (no en edición)
 void dibujarMenu() {
   int paginaActual = menuOpcion / OPCIONES_POR_PAGINA;
   int totalPaginas = (TOTAL_OPCIONES + OPCIONES_POR_PAGINA - 1) / OPCIONES_POR_PAGINA;
@@ -124,9 +132,10 @@ void dibujarMenu() {
         break;
       case 5:
         u8g2.print("Invertir: ");
-        // Se asume que inversionActiva está definida externamente
-        extern bool inversionActiva;
-        u8g2.print(inversionActiva ? "ON" : "OFF");
+        {
+          extern bool inversionActiva;
+          u8g2.print(inversionActiva ? "ON" : "OFF");
+        }
         break;
       case 6:
         u8g2.print("Ahorro: ");
@@ -135,18 +144,49 @@ void dibujarMenu() {
         else
           u8g2.print(String(ahorroTimeoutMs / 60000) + " min");
         break;
+      case 7:
+        u8g2.print("Offset: ");
+        if (unidadMetros) {
+          u8g2.print(alturaOffset, 2);
+          u8g2.print(" m");
+        } else {
+          u8g2.print(alturaOffset * 3.281, 0);
+          u8g2.print(" ft");
+        }
+        break;
+      case 8:
+        u8g2.print("Snake");
+        break;
     }
   }
   
   u8g2.setCursor(100, 63);
   u8g2.print(String(paginaActual + 1) + "/" + String(totalPaginas));
   if (paginaActual > 0) {
-    u8g2.setCursor(0, 63);
+    u8g2.setCursor(90, 63);
     u8g2.print("<");
   }
   if (paginaActual < totalPaginas - 1) {
     u8g2.setCursor(120, 63);
     u8g2.print(">");
+  }
+  u8g2.sendBuffer();
+}
+
+// Función que dibuja la pantalla de edición del offset
+void dibujarOffsetEdit() {
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  u8g2.setCursor(5, 20);
+  u8g2.print("Editar Altura");
+  u8g2.setCursor(5, 50);
+  u8g2.setFont(u8g2_font_ncenB18_tr);
+  if (unidadMetros) {
+    u8g2.print(offsetTemp, 2);
+    u8g2.print(" m");
+  } else {
+    u8g2.print(offsetTemp * 3.281, 0);
+    u8g2.print(" ft");
   }
   u8g2.sendBuffer();
 }
@@ -187,14 +227,16 @@ static void ejecutarOpcionMenu(int opcion) {
       Serial.println(bleActivo ? "ON" : "OFF");
       break;
     case 5: // Cambiar modo de inversión
-      extern bool inversionActiva;
-      inversionActiva = !inversionActiva;
-      if (inversionActiva) {
-        u8g2.sendF("c", 0xA7);
-        Serial.println("Display invertido.");
-      } else {
-        u8g2.sendF("c", 0xA6);
-        Serial.println("Display en modo normal.");
+      {
+        extern bool inversionActiva;
+        inversionActiva = !inversionActiva;
+        if (inversionActiva) {
+          u8g2.sendF("c", 0xA7);
+          Serial.println("Display invertido.");
+        } else {
+          u8g2.sendF("c", 0xA6);
+          Serial.println("Display en modo normal.");
+        }
       }
       break;
     case 6: // Cambiar modo ahorro
@@ -206,41 +248,113 @@ static void ejecutarOpcionMenu(int opcion) {
       else
         Serial.println(String(ahorroTimeoutMs / 60000) + " min");
       break;
+    case 7: // Opción de offset de altitud
+      if (!editingOffset) {
+        // Entrar en modo de edición para el offset
+        editingOffset = true;
+        offsetTemp = alturaOffset;  // Inicializamos con el valor actual
+        Serial.println("Modo edición de offset iniciado.");
+      }
+      // Nota: La confirmación se realizará en processMenu() al presionar BUTTON_OLED.
+      break;
+    case 8:
+    // Nueva opción: Juego Snake
+      playSnakeGame();
+      Serial.println("Juego Snake iniciado.");
+      break;
   }
   saveConfig();
 }
 
 // Función para procesar la navegación del menú
 void processMenu() {
-  // Si se presiona BUTTON_MENU, se cierra el menú
+  // Si estamos en modo de edición del offset, procesamos los botones para incrementar/decrementar
+  if (editingOffset) {
+    bool updated = false;  // Bandera para saber si se modificó el valor
+    // Incrementar el offset con BUTTON_ALTITUDE
+    if (digitalRead(BUTTON_MENU) == LOW) {
+      delay(50);  // debounce
+      if (unidadMetros) {
+        offsetTemp += 30;  // Incrementa 0.1 m
+      } else {
+        offsetTemp += 100.0 / 3.281;  // Incrementa 10 ft (convertido a m)
+      }
+      updated = true;
+      Serial.print("Offset temporal incrementado: ");
+      Serial.println(offsetTemp);
+      while(digitalRead(BUTTON_MENU) == LOW) {
+        delay(10);
+      }
+    }
+    // Decrementar el offset con BUTTON_MENU
+    if (digitalRead(BUTTON_ALTITUDE) == LOW) {
+      delay(50);  // debounce
+      if (unidadMetros) {
+        offsetTemp -= 30;  // Decrementa 0.1 m
+      } else {
+        offsetTemp -= 100.0 / 3.281;  // Decrementa 10 ft (convertido a m)
+      }
+      updated = true;
+      Serial.print("Offset temporal decrementado: ");
+      Serial.println(offsetTemp);
+      while(digitalRead(BUTTON_ALTITUDE) == LOW) {
+        delay(10);
+      }
+    }
+    // Si hubo un cambio, actualizar la pantalla de edición
+    if (updated) {
+      dibujarOffsetEdit();
+    }
+    // Confirmar la edición con BUTTON_OLED
+    if (digitalRead(BUTTON_OLED) == LOW) {
+      delay(50);
+      alturaOffset = offsetTemp;
+      saveConfig();
+      editingOffset = false;
+      Serial.print("Offset confirmado: ");
+      if (unidadMetros) {
+        Serial.print(alturaOffset, 2);
+        Serial.println(" m");
+      } else {
+        Serial.print(alturaOffset * 3.281, 0);
+        Serial.println(" ft");
+      }
+      while(digitalRead(BUTTON_OLED) == LOW) {
+        delay(10);
+      }
+    }
+    return;  // Mientras se está editando, no procesar el resto del menú
+  }
+  
+  // Si se presiona BUTTON_MENU y no estamos en modo edición, se cierra el menú
   if (digitalRead(BUTTON_MENU) == LOW) {
-    delay(50);  // debounce
+    delay(50);
     menuActivo = false;
     lastMenuInteraction = millis();
     Serial.println("Menú cerrado.");
-    while (digitalRead(BUTTON_MENU) == LOW);
+    while(digitalRead(BUTTON_MENU) == LOW);
     return;
   }
   
-  // Si se presiona BUTTON_ALTITUDE, cambiar de opción y actualizar el contador
+  // Cambiar de opción con BUTTON_ALTITUDE
   if (digitalRead(BUTTON_ALTITUDE) == LOW) {
     delay(50);
     menuOpcion = (menuOpcion + 1) % TOTAL_OPCIONES;
     lastMenuInteraction = millis();
     Serial.print("Opción del menú cambiada a: ");
     Serial.println(menuOpcion);
-    while (digitalRead(BUTTON_ALTITUDE) == LOW);
+    while(digitalRead(BUTTON_ALTITUDE) == LOW);
   }
   
-  // Si se presiona BUTTON_OLED, confirmar la opción y actualizar el contador
+  // Confirmar opción con BUTTON_OLED (para opciones que no sean offset)
   if (digitalRead(BUTTON_OLED) == LOW) {
     delay(50);
     ejecutarOpcionMenu(menuOpcion);
     lastMenuInteraction = millis();
-    while (digitalRead(BUTTON_OLED) == LOW);
+    while(digitalRead(BUTTON_OLED) == LOW);
   }
   
-  // Si han pasado 7 segundos sin interacción, cerrar el menú
+  // Si no hay interacción por 7 segundos, cerrar el menú
   if (millis() - lastMenuInteraction > 7000) {
     menuActivo = false;
     Serial.println("Menú cerrado por inactividad.");
@@ -276,25 +390,19 @@ void updateUI() {
     u8g2.setCursor(128 - batWidth - 2, 12);
     u8g2.print(batStr);
     
-    // Calcular la altitud real y la altitud relativa (sin alterar la lectura real)
+    // Calcular la altitud real y la altitud relativa (incorporando el offset)
     float altActual = bmp.readAltitude(1013.25);
-    //float altCalculada = altActual - altitudReferencia;
-    float altCalculada = altActual - altitudReferencia;
-
-    // Si se requiere trabajar en pies, se realiza la conversión
+    float altCalculada = altActual - altitudReferencia + alturaOffset;
     if (!unidadMetros) {
       altCalculada *= 3.281;
     }
     
-    // Determinar el string a mostrar según el formato configurado.
-    // Si la altitud (en la unidad usada) es menor en valor absoluto que el umbral,
-    // se mostrará "0"; de lo contrario se mostrará el valor real.
+    // Determinar el string a mostrar según el formato configurado
     String altDisplay;
     float umbral = unidadMetros ? 6.1 : 20.0;
     if (fabs(altCalculada) < umbral) {
       altDisplay = "0";
-    } 
-    else {
+    } else {
       if (altFormat == 0) {
         altDisplay = String((long)altCalculada);
       } else {
@@ -319,7 +427,7 @@ void updateUI() {
     u8g2.drawVLine(0, 0, 64);
     u8g2.drawVLine(127, 0, 64);
     
-    // Mostrar usuario en la parte inferior, centrado
+    // Mostrar usuario centrado en la parte inferior
     u8g2.setFont(u8g2_font_ncenB08_tr);
     String user = usuarioActual;
     int xPosUser = (128 - u8g2.getStrWidth(user.c_str())) / 2;
@@ -327,30 +435,31 @@ void updateUI() {
     u8g2.setCursor(xPosUser, 62);
     u8g2.print(user);
     
+    // Mostrar el contador de saltos en la esquina inferior derecha
     String jumpStr = String(jumpCount);
-    int xPosJump = 128 - u8g2.getStrWidth(jumpStr.c_str()) - 14; // margen de 2 píxeles
-    int yPosJump = 62; // Puedes ajustar verticalmente según convenga
+    int xPosJump = 128 - u8g2.getStrWidth(jumpStr.c_str()) - 14;
+    int yPosJump = 62;
     u8g2.setCursor(xPosJump, yPosJump);
     u8g2.print(jumpStr);
-
-    // Mostrar indicador de "en salto" (bola en la esquina inferior izquierda)
+    
+    // Mostrar indicador de "en salto" en la esquina inferior izquierda
     extern bool enSalto;
     extern bool ultraPreciso;
     if (enSalto) {
       if (ultraPreciso) {
-        // Dibuja una bola hueca (círculo vacío) cuando está en modo precisión
         u8g2.drawDisc(14, 58, 4);
       } else {
-        // Dibuja una bola rellena cuando no está en modo precisión
         u8g2.drawCircle(14, 58, 4);
       }
     }
     
     u8g2.sendBuffer();
-  }
-  else {
-    // Si el menú está activo, mostrar la pantalla de batería o el menú normal
-    if (batteryMenuActive) {
+  } else {
+    // Si el menú está activo, si estamos en modo edición de offset mostramos esa pantalla,
+    // de lo contrario mostramos el menú normal (o el menú de batería)
+    if (editingOffset) {
+      dibujarOffsetEdit();
+    } else if (batteryMenuActive) {
       if (pantallaEncendida) {
         int lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);
         float voltajeADC = (lecturaADC / 4095.0) * 2.6;
@@ -380,11 +489,10 @@ void updateUI() {
           batteryMenuActive = false;
           lastMenuInteraction = millis();
           Serial.println("Battery menu cerrado.");
-          while (digitalRead(BUTTON_OLED) == LOW);
+          while(digitalRead(BUTTON_OLED) == LOW);
         }
       }
     } else {
-      // Mostrar menú normal
       dibujarMenu();
     }
   }

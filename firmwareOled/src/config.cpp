@@ -15,6 +15,9 @@ bool inversionActiva = true;
 String usuarioActual = "default_user";
 bool bleActivo = true;
 
+float alturaOffset = 0.0;
+
+
 const int NUM_TIMEOUT_OPTIONS = 4;
 
 
@@ -26,6 +29,7 @@ void loadConfig() {
   ahorroTimeoutOption = prefs.getInt("ahorro", 0);
   ahorroTimeoutMs = TIMEOUT_OPTIONS[ahorroTimeoutOption];
   inversionActiva = prefs.getBool("invert", true);
+  alturaOffset = prefs.getFloat("alturaOffset", 0.0);
   prefs.end();
 }
 
@@ -36,6 +40,7 @@ void saveConfig() {
   prefs.putInt("altFormat", altFormat);
   prefs.putInt("ahorro", ahorroTimeoutOption);
   prefs.putBool("invert", inversionActiva);
+  prefs.putFloat("alturaOffset", alturaOffset);
   prefs.end();
 }
 

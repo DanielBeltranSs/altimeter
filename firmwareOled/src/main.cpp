@@ -5,7 +5,7 @@
 #include "sensor_module.h"
 #include "ui_module.h"
 #include "buzzer_module.h"
-
+#include "config.h"
 
 // Variables globales para la UI y menú
 bool pantallaEncendida = true;
@@ -13,7 +13,7 @@ bool pantallaEncendida = true;
 // Variable para la calibración automática al inicio
 bool calibracionRealizada = false;
 
-
+extern float alturaOffset;
 
 void setup() {
   Serial.begin(115200);
@@ -83,6 +83,7 @@ void loop() {
         if (millis() - startTime >= 1000) {  // Si se mantiene por 2 segundos o más
           if (bmp.performReading()) {
             altitudReferencia = bmp.readAltitude(1013.25);
+            alturaOffset = 0.0; // Reiniciar offset a cero
             Serial.println("Altitud reiniciada a cero por botón tras 3 segundos.");
             buzzerBeep(2000, 240, 1000); // Sonido de confirmación
           } else {
