@@ -31,6 +31,8 @@ const unsigned long moveInterval = 250; // Tiempo entre movimientos (en ms)
 bool gameOver = false;
 int score = 0;
 
+
+
 // Se asume que el objeto "u8g2" ya está declarado globalmente (por ejemplo, en ui_module.cpp)
 
 bool isPointOnSnake(Point p) {
@@ -71,6 +73,10 @@ void drawSnakeGame() {
 
 void playSnakeGame() {
   // Inicialización del juego: posición inicial de la serpiente en el centro.
+  while (digitalRead(BUTTON_OLED) == LOW) {
+    delay(10);
+  }
+  
   snakeLength = 3;
   snake[0] = {GRID_WIDTH / 2, GRID_HEIGHT / 2};      // Cabeza
   snake[1] = {GRID_WIDTH / 2, GRID_HEIGHT / 2 + 1};

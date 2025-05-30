@@ -17,6 +17,9 @@ bool startupDone = false;
 const int TOTAL_OPCIONES = 9;
 const int OPCIONES_POR_PAGINA = 4;
 
+bool gameSnakeRunning = false;
+
+
 // Variables para el modo edición de offset
 bool editingOffset = false;
 float offsetTemp = 0.0;  // Valor temporal para el offset mientras se edita
@@ -258,10 +261,12 @@ static void ejecutarOpcionMenu(int opcion) {
       // Nota: La confirmación se realizará en processMenu() al presionar BUTTON_OLED.
       break;
     case 8:
-    // Nueva opción: Juego Snake
+      gameSnakeRunning = true;
       playSnakeGame();
-      Serial.println("Juego Snake iniciado.");
+      gameSnakeRunning = false;
+      Serial.println("Juego Snake finalizado.");
       break;
+    
   }
   saveConfig();
 }
@@ -367,6 +372,9 @@ void updateUI() {
     mostrarCuentaRegresiva();
     return;
   }
+  if (gameSnakeRunning) return; // No actualizamos la UI si el juego está activo.
+// ... resto de la función
+  
   if (!menuActivo) {
     // Pantalla principal
     u8g2.clearBuffer();

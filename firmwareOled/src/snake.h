@@ -10,6 +10,8 @@
 #define CELL_SIZE        8       // Tamaño en píxeles de cada celda
 #define MAX_SNAKE_LENGTH 128     // Longitud máxima de la serpiente
 
+extern bool gameSnakeRunning;
+
 // Enumeración para las direcciones de movimiento
 enum Direction { 
   UP, 
