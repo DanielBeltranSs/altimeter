@@ -5,7 +5,7 @@
 #include <U8g2lib.h>
 #include "sensor_module.h"
 #include <driver/adc.h>
-#include <math.h>        // fabs(), powf
+#include <math.h>        // fabsf(), powf
 #include "buzzer_module.h"
 #include "snake.h"
 
@@ -14,43 +14,40 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 bool startupDone = false;
 
 // Constantes para el menú
-const int TOTAL_OPCIONES = 9;
+const int TOTAL_OPCIONES      = 9;
 const int OPCIONES_POR_PAGINA = 4;
 
 bool gameSnakeRunning = false;
 
 // Variables para el modo edición de offset
-bool editingOffset = false;
-float offsetTemp = 0.0f;  // Valor temporal para el offset mientras se edita
+bool  editingOffset = false;
+float offsetTemp    = 0.0f;  // Valor temporal para el offset mientras se edita
 
 // Variables globales para el menú
-int  menuOpcion = 0;
-bool menuActivo = false;
+int  menuOpcion        = 0;
+bool menuActivo        = false;
 bool batteryMenuActive = false; // Para el menú de batería
 
 // Declaración de variables externas de configuración (definidas en config.cpp)
-extern bool unidadMetros;
-extern int  brilloPantalla;
-extern int  altFormat;
-extern bool bleActivo;
+extern bool  unidadMetros;
+extern int   brilloPantalla;
+extern int   altFormat;
+extern bool  bleActivo;
 extern unsigned long ahorroTimeoutMs;
-extern int  ahorroTimeoutOption;
+extern int   ahorroTimeoutOption;
 extern float alturaOffset;     // Offset de altitud en metros
 extern String usuarioActual;
 
 // Variables provenientes del módulo de sensor / UI
-extern int   cachedBatteryPercentage;
-extern uint32_t jumpCount;
-extern bool  pantallaEncendida;
+extern int        cachedBatteryPercentage;
+extern uint32_t   jumpCount;
+extern bool       pantallaEncendida;
+extern float      altCalculada;   // Altitud relativa en metros (ya con offset), del sensor
+extern bool       jumpArmed;      // armado (contorno)
+extern bool       inJump;         // en salto (relleno)
 
 // Variable para el timeout del menú
 long lastMenuInteraction = 0;
-
-// === Nuevos extern para la lógica de salto ===
-// NOTA: Estos flags los actualiza sensor_module.cpp
-extern float altCalculada;   // Altitud relativa en metros (ya con offset), actualizada por el sensor
-extern bool  jumpArmed;      // "armado" (contorno)
-extern bool  inJump;         // "en salto" confirmado (relleno)
 
 // ---------------------------------------------------------------------------
 // Función para inicializar la UI
@@ -95,7 +92,7 @@ void mostrarCuentaRegresiva() {
   
   if (elapsed >= 3000) startupDone = true;
 
-  // Beep de 1 segundo al finalizar la configuración inicial (igual que tu versión)
+  // Beep de 1 segundo al finalizar la configuración inicial
   buzzerBeep(2000, 240, 1000);
   delay(100);
 }
@@ -300,9 +297,9 @@ void processMenu() {
     if (digitalRead(BUTTON_MENU) == LOW) {
       delay(50);  // debounce
       if (unidadMetros) {
-        offsetTemp += 30;  // (tu comentario decía 0.1 m; aquí respeta tu valor actual)
+        offsetTemp += 0.1f;                      // paso fino en metros
       } else {
-        offsetTemp += 100.0f / 3.281f;  // 10 ft (convertido a m)
+        offsetTemp += 10.0f / 3.281f;            // 10 ft en metros
       }
       updated = true;
       Serial.print("Offset temporal incrementado: ");
@@ -315,9 +312,9 @@ void processMenu() {
     if (digitalRead(BUTTON_ALTITUDE) == LOW) {
       delay(50);  // debounce
       if (unidadMetros) {
-        offsetTemp -= 30;
+        offsetTemp -= 0.1f;
       } else {
-        offsetTemp -= 100.0f / 3.281f;
+        offsetTemp -= 10.0f / 3.281f;
       }
       updated = true;
       Serial.print("Offset temporal decrementado: ");
@@ -395,8 +392,20 @@ void updateUI() {
     return;
   }
   if (gameSnakeRunning) return; // No actualizamos la UI si el juego está activo.
+  if (!pantallaEncendida) return; // No dibujar si la pantalla está apagada
 
   if (!menuActivo) {
+    // ---------- Throttling del repintado por modo ----------
+    static uint32_t t_last_ui = 0;
+    uint16_t ui_interval = 140;                 // Ahorro:  ~7 Hz
+    SensorMode m = getSensorMode();
+    if (m == SENSOR_MODE_ULTRA_PRECISO) ui_interval = 100;  // ~10 Hz
+    if (m == SENSOR_MODE_FREEFALL)     ui_interval = 80;    // ~12 Hz (ajustable)
+    uint32_t now_ui = millis();
+    if (now_ui - t_last_ui < ui_interval) return;
+    t_last_ui = now_ui;
+    // -------------------------------------------------------
+
     // Pantalla principal
     u8g2.clearBuffer();
     
@@ -425,18 +434,18 @@ void updateUI() {
       altRel *= 3.281f;                    // pies
     }
 
-    // Formateo de altura (tu lógica con umbral y decimales)
+    // Formateo de altura (umbral = mostrar "0" literal)
     String altDisplay;
     float umbral = unidadMetros ? 6.1f : 20.0f;
-    if (fabs(altRel) < umbral) {
-      altDisplay = String((long)altRel);
+    if (fabsf(altRel) < umbral) {
+      altDisplay = "0";
     } else {
       if (altFormat == 0) {
         altDisplay = String((long)altRel);
       } else {
-        float scale = powf(10.0f, altFormat);
+        float scale   = powf(10.0f, altFormat);
         float altTrunc = floorf(altRel * scale) / scale;
-        altDisplay = String(altTrunc, altFormat);
+        altDisplay    = String(altTrunc, altFormat);
       }
     }
     
@@ -489,7 +498,7 @@ void updateUI() {
       dibujarOffsetEdit();
     } else if (batteryMenuActive) {
       if (pantallaEncendida) {
-        int lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);
+        int   lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);
         float voltajeADC = (lecturaADC / 4095.0f) * 2.6f;
         float factorCorreccion = 1.2f;
         float v_adc = voltajeADC;

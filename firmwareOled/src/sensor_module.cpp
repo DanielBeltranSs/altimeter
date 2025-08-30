@@ -17,7 +17,7 @@
 #endif
 // Altura fija en pies para pruebas (p. ej. 0, 80, 2500, 12050)
 #ifndef ALT_SIM_FT
-#define ALT_SIM_FT 12050.0f
+#define ALT_SIM_FT 12450.0f
 #endif
 
 // ------------------------------
@@ -69,10 +69,17 @@ float v_adc        = 0.0f;
 float v_bat        = 0.0f;
 
 // ------------------------------
-// Variables para la detección del salto
+// Variables para armado/salto y NVS
 // ------------------------------
-bool enSalto = false;
-bool ultraPreciso = false;
+bool enSalto = false;         // compat: armado/actividad por altura
+bool ultraPreciso = false;    // compat: true=contorno, false=relleno (map a inJump)
+bool jumpArmed = false;       // NUEVO: armado por altura (>=60 ft), para UI
+bool inJump   = false;        // NUEVO: freefall confirmado, para UI
+
+static bool prevFreefall = false;
+static uint32_t freefallSinceMs = 0;
+static const uint32_t FF_CONFIRM_MS = 300;   // confirma freefall (0.3 s)
+
 static Preferences prefsSaltos;
 uint32_t jumpCount = 0;
 
@@ -99,9 +106,12 @@ void initSensor() {
   lastAltChangeTime = millis();
 
   // Inicializar el contador de saltos desde NVS (si no existe, se usa 0)
-  prefsSaltos.begin("saltos", false);
-  jumpCount = prefsSaltos.getUInt("jumpCount", 0);
-  prefsSaltos.end();
+  if (prefsSaltos.begin("saltos", false)) {   // false = RW
+    jumpCount = prefsSaltos.getUInt("jumpCount", 0);
+    prefsSaltos.end();
+  } else {
+    Serial.println("NVS: no se pudo abrir 'saltos' en init (RW).");
+  }
 }
 
 // ====================================================
@@ -149,9 +159,6 @@ void updateSensorData() {
   // Convertir la altitud relativa (en metros) a pies (para decisiones de modo)
   const float altEnPies = altCalculada * 3.281f;
 
-  // Serial de depuración (opcional: comentar si quieres máximo rendimiento)
-  // Serial.printf("Altitud: %.2f ft\n", altEnPies);
-
   // --------------------------------------------------
   // 2) Configuración de modos según la altitud
   // --------------------------------------------------
@@ -166,6 +173,10 @@ void updateSensorData() {
       Serial.println("Modo Ahorro activado (Altitud < 60 ft)");
       lastForcedReadingTime = millis();
     }
+
+    // Señales de UI/estado
+    jumpArmed = false;
+    inJump = false;
     enSalto = false;
     ultraPreciso = false;
   }
@@ -179,8 +190,12 @@ void updateSensorData() {
       bmp.setOutputDataRate(BMP3_ODR_50_HZ);
       Serial.println("Modo Ultra Preciso activado (60 ft <= Altitud <= 10000 ft)");
     }
+
+    // Señales de UI/estado
+    jumpArmed = true;       // armado por altura
+    // inJump se maneja abajo por flanco de freefall
     enSalto = true;
-    ultraPreciso = true;
+    ultraPreciso = true;    // compat: contorno
   }
   else {
     // FREEFALL
@@ -193,28 +208,52 @@ void updateSensorData() {
       // bmp.setOutputDataRate(BMP3_ODR_200_HZ); // No afecta en FORCED/performReading()
       Serial.println("Modo Freefall activado (Altitud > 10000 ft)");
     }
-    enSalto = true;
-    ultraPreciso = false;
 
-    // Reversión a ULTRA_PRECISO si baja de 3000 ft (pero mantiene >= 60 ft)
-    if (altEnPies < 3000.0f && altEnPies >= 60.0f) {
-      currentMode = SENSOR_MODE_ULTRA_PRECISO;
-      bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_16X);
-      bmp.setPressureOversampling(BMP3_OVERSAMPLING_16X);
-      bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_7);
-      bmp.setOutputDataRate(BMP3_ODR_50_HZ);
-      Serial.println("Reversión de Freefall: Cambio a Ultra Preciso (Altitud < 3000 ft)");
-      enSalto = true;
-      ultraPreciso = true;
+    // Señales de UI/estado
+    jumpArmed = true;
+    // inJump se maneja abajo por flanco
+    enSalto = true;
+    // ultraPreciso lo mapeamos a !inJump más abajo
+  }
+
+  // ------------------------------
+  // 2.b) Señales para UI + transición de salto (flanco + confirmación)
+  // ------------------------------
+  const bool nowFreefall = (currentMode == SENSOR_MODE_FREEFALL);
+
+  if (nowFreefall && !prevFreefall) {
+    // Inicio potencial de freefall: arrancar temporizador de confirmación
+    freefallSinceMs = millis();
+  }
+
+  // Confirmación de entrada a FREEFALL y conteo de salto (una sola vez)
+  if (!prevFreefall && nowFreefall && (millis() - freefallSinceMs) >= FF_CONFIRM_MS) {
+    inJump = true;  // UI: relleno
+
+    // Persistir en NVS (evento, no en cada loop)
+    jumpCount++;
+    if (prefsSaltos.begin("saltos", false)) {   // false = RW
+      prefsSaltos.putUInt("jumpCount", jumpCount);
+      prefsSaltos.end();
+      Serial.printf("NVS: jumpCount actualizado a %u\n", jumpCount);
+    } else {
+      Serial.println("NVS: no se pudo abrir 'saltos' (RW) para guardar jumpCount.");
     }
   }
+
+  // Al salir de freefall, apagar relleno
+  if (!nowFreefall) {
+    inJump = false;
+  }
+
+  // Compatibilidad con flags previos
+  ultraPreciso = jumpArmed && !inJump;  // true=contorno (armado), false=relleno (en salto)
+  prevFreefall = nowFreefall;
 
   // --------------------------------------------------
   // 3) Control de la UI: Ahorro de energía en la pantalla
   // --------------------------------------------------
   {
-    // Actualizar pantalla cuando no se está en menú, la lectura es correcta
-    // y está habilitado el ahorro.
     const bool sensorOk = true; // asumimos OK (ya leímos arriba)
     if (!menuActivo && sensorOk && ahorroTimeoutMs > 0) {
       if (fabs(altitud - lastAltForAhorro) > ALT_CHANGE_THRESHOLD) {
