@@ -75,10 +75,10 @@ void mostrarCuentaRegresiva() {
   u8g2.print(cuenta);
   
   u8g2.setFont(u8g2_font_ncenB08_tr);
-  int w = u8g2.getStrWidth("Calibrando...");
+  int w = u8g2.getStrWidth("Iniciando...");
   int x = (128 - w) / 2;
   u8g2.setCursor(x, 60);
-  u8g2.print("Calibrando...");
+  u8g2.print("Iniciando...");
   u8g2.sendBuffer();
   
   if (elapsed >= 3000) startupDone = true;
@@ -405,20 +405,32 @@ void updateUI() {
       altCalculada *= 3.281;
     }
     
-    // Determinar el string a mostrar según el formato configurado
-    String altDisplay;
-    float umbral = unidadMetros ? 6.1 : 20.0;
-    if (fabs(altCalculada) < umbral) {
-      altDisplay = "0";
-    } else {
-      if (altFormat == 0) {
-        altDisplay = String((long)altCalculada);
-      } else {
-        float altScaled = altCalculada * 0.001;
-        float altTrunc = floor(altScaled * pow(10, altFormat)) / pow(10, altFormat);
-        altDisplay = String(altTrunc, altFormat);
-      }
-    }
+      // si está en umbral, mostrar 0
+       String altDisplay;
+       float umbral = unidadMetros ? 6.1 : 20.0;
+       if (fabs(altCalculada) < umbral) {
+         altDisplay = String((long)altCalculada);//"0";
+       } else {
+         if (altFormat == 0) {
+           altDisplay = String((long)altCalculada);
+         } else {
+           float altScaled = altCalculada * 0.001;
+           float altTrunc = floor(altScaled * pow(10, altFormat)) / pow(10, altFormat);
+           altDisplay = String(altTrunc, altFormat);
+         }
+       }
+
+      // Después, siempre mostramos la altura:
+      //String altDisplay;
+      //if (altFormat == 0) {
+        // Sin decimales: truncamos a entero
+       // altDisplay = String((long)altCalculada);
+      //} else {
+        // Con decimales según altFormat
+      //  float altTrunc = floor(altCalculada * pow(10, altFormat)) / pow(10, altFormat);
+      //  altDisplay = String(altTrunc, altFormat);
+      //}
+
     
     // Mostrar la altitud en grande, centrada
     u8g2.setFont(u8g2_font_fub30_tr);

@@ -12,7 +12,8 @@ const long TIMEOUT_OPTIONS[] = {0, 60000, 120000, 300000};
 
 unsigned long ahorroTimeoutMs = TIMEOUT_OPTIONS[0];
 bool inversionActiva = true;
-String usuarioActual = "default_user";
+//String usuarioActual = "default_user";
+String usuarioActual = "elDani";  // Nombre de usuario por defecto
 bool bleActivo = true;
 
 float alturaOffset = 0.0;
@@ -46,7 +47,7 @@ void saveConfig() {
 
 void loadUserConfig() {
   prefs.begin("config", false);
-  usuarioActual = prefs.getString("user", "default_user");
+  usuarioActual = prefs.getString("user", "elDani");
   prefs.end();
 }
 
