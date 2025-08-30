@@ -26,7 +26,7 @@
 static SensorMode currentMode = SENSOR_MODE_AHORRO;   // inicia en Ahorro
 static unsigned long lastForcedReadingTime = 0;       // para "lectura cada 60s" en Ahorro
 
-// Exponer el modo actual (misma linkage C++)
+// Exponer el modo actual
 SensorMode getSensorMode() {
   return currentMode;
 }
@@ -36,17 +36,15 @@ SensorMode getSensorMode() {
 // ------------------------------
 extern bool calibracionRealizada;
 extern float alturaOffset;
-extern void onSampleAccepted();
-
-
+extern void onSampleAccepted();   // definida en main.cpp
 
 // ------------------------------
 // Objeto para el sensor BMP390 y variables de altitud
 // ------------------------------
 Adafruit_BMP3XX bmp;
 float altitudReferencia = 0.0f;
-float altCalculada      = 0.0f;
-float altitud           = 0.0f;
+float altCalculada      = 0.0f;   // relativa (m)
+float altitud           = 0.0f;   // absoluta (m)
 
 // ------------------------------
 // Variables para el manejo de la batería
@@ -123,7 +121,7 @@ void updateSensorData() {
       (currentMode != SENSOR_MODE_AHORRO);
 
   if (debeLeer) {
-    const bool sensorOk = bmp.performReading();
+    const bool sensorOk = bmp.performReading(); // FORCED/one-shot (bloqueante)
     if (sensorOk) {
       const float altActual = bmp.readAltitude(1013.25);
       altitud       = altActual;
@@ -133,11 +131,11 @@ void updateSensorData() {
       // -------- Opción A: inyectar altitud fija de prueba --------
       // Forzamos una altura absoluta simulada (en pies) convertida a metros
       const float simAltM = ALT_SIM_FT / 3.281f;
-      altitud      = simAltM;                                       // absoluto en metros
-      altCalculada = simAltM - altitudReferencia + alturaOffset;    // relativa (lo que usa tu lógica)
+      altitud      = simAltM;                                       // absoluto (m)
+      altCalculada = simAltM - altitudReferencia + alturaOffset;    // relativa (m)
 #endif
 
-      // Contador de Hz (si lo estás usando en main.cpp)
+      // Contador de Hz (instrumentación en main.cpp)
       onSampleAccepted();
     }
 
@@ -148,12 +146,11 @@ void updateSensorData() {
     }
   }
 
-  // Convertir la altitud relativa (en metros) a pies
+  // Convertir la altitud relativa (en metros) a pies (para decisiones de modo)
   const float altEnPies = altCalculada * 3.281f;
-  //comprovar altura
-  //Serial.print("Altitud: ");
-  //Serial.print(altEnPies);
-  //Serial.println(" ft");
+
+  // Serial de depuración (opcional: comentar si quieres máximo rendimiento)
+  // Serial.printf("Altitud: %.2f ft\n", altEnPies);
 
   // --------------------------------------------------
   // 2) Configuración de modos según la altitud
@@ -169,6 +166,8 @@ void updateSensorData() {
       Serial.println("Modo Ahorro activado (Altitud < 60 ft)");
       lastForcedReadingTime = millis();
     }
+    enSalto = false;
+    ultraPreciso = false;
   }
   else if (altEnPies <= 10000.0f) {
     // ULTRA PRECISO
@@ -180,29 +179,33 @@ void updateSensorData() {
       bmp.setOutputDataRate(BMP3_ODR_50_HZ);
       Serial.println("Modo Ultra Preciso activado (60 ft <= Altitud <= 10000 ft)");
     }
+    enSalto = true;
+    ultraPreciso = true;
   }
   else {
     // FREEFALL
     if (currentMode != SENSOR_MODE_FREEFALL) {
       currentMode = SENSOR_MODE_FREEFALL;
-      ultraPreciso = false; // coherencia semántica
-      bmp.setTemperatureOversampling(BMP3_NO_OVERSAMPLING);   // baja latencia
+      // Mínimo coste en Adafruit: T sin oversampling y P a 2X
+      bmp.setTemperatureOversampling(BMP3_NO_OVERSAMPLING);
       bmp.setPressureOversampling(BMP3_OVERSAMPLING_2X);
       bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_DISABLE);         // IIR OFF
-      //bmp.setOutputDataRate(BMP3_ODR_200_HZ); //NO AFECTA EN FORCED
+      // bmp.setOutputDataRate(BMP3_ODR_200_HZ); // No afecta en FORCED/performReading()
       Serial.println("Modo Freefall activado (Altitud > 10000 ft)");
     }
-
-    // Importante: NO llamar performReading() aquí inmediatamente tras reconfigurar.
+    enSalto = true;
+    ultraPreciso = false;
 
     // Reversión a ULTRA_PRECISO si baja de 3000 ft (pero mantiene >= 60 ft)
     if (altEnPies < 3000.0f && altEnPies >= 60.0f) {
       currentMode = SENSOR_MODE_ULTRA_PRECISO;
       bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_16X);
       bmp.setPressureOversampling(BMP3_OVERSAMPLING_16X);
-      bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_7); // solo coeficiente válido
+      bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_7);
       bmp.setOutputDataRate(BMP3_ODR_50_HZ);
       Serial.println("Reversión de Freefall: Cambio a Ultra Preciso (Altitud < 3000 ft)");
+      enSalto = true;
+      ultraPreciso = true;
     }
   }
 
@@ -236,18 +239,17 @@ void updateSensorData() {
   // --------------------------------------------------
   // 4) Notificación vía BLE (si pCharacteristic está inicializado)
   // --------------------------------------------------
-if (pCharacteristic != nullptr) {
-  static uint32_t t_last_ble = 0;
-  const uint32_t ble_interval = (currentMode == SENSOR_MODE_FREEFALL) ? 100 : 250;
-  if (millis() - t_last_ble >= ble_interval) {
-    long altInt = (long) (altCalculada * 3.281f);
-    String altStr = String(altInt);
-    pCharacteristic->setValue(altStr.c_str());
-    pCharacteristic->notify();
-    t_last_ble = millis();
+  if (pCharacteristic != nullptr) {
+    static uint32_t t_last_ble = 0;
+    const uint32_t ble_interval = (currentMode == SENSOR_MODE_FREEFALL) ? 100 : 250; // 10 Hz / 4 Hz
+    if (millis() - t_last_ble >= ble_interval) {
+      long altInt = (long)(altCalculada * 3.281f); // enviar pies como entero
+      String altStr = String(altInt);
+      pCharacteristic->setValue(altStr.c_str());
+      pCharacteristic->notify();
+      t_last_ble = millis();
+    }
   }
-}
-
 }
 
 // ====================================================

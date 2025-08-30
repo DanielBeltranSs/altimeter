@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <driver/adc.h>  
 #include "config.h"
 #include "ble_module.h"
 #include "sensor_module.h"
@@ -48,6 +49,11 @@ extern float alturaOffset;
 extern Adafruit_BMP3XX bmp;
 extern float altitudReferencia;
 
+// (Declaradas en ui_module.h)
+extern bool menuActivo;
+extern int  menuOpcion;
+extern long lastMenuInteraction;
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -57,15 +63,13 @@ void setup() {
   markFirmwareAsValid();
   
   Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.setClock(400000);  // 400 kHz; el BMP390 soporta hasta 3.4 MHz
+  Wire.setClock(400000);  // 400 kHz; el BMP390 soporta más, pero esto ya ayuda
 
-  
   // Cargar configuración y datos de usuario
   loadConfig();
   loadUserConfig();
   
   initBuzzer();
-
   setupBLE();
   initUI();
   initSensor();

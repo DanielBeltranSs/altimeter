@@ -1,11 +1,11 @@
 #include "ui_module.h"
 #include "config.h"
-#include "ble_module.h"  // Para toggleBLE(), si se usa en alguna opción
+#include "ble_module.h"  // toggleBLE()
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include "sensor_module.h"
 #include <driver/adc.h>
-#include <math.h>   // Para fabs()
+#include <math.h>        // fabs(), powf
 #include "buzzer_module.h"
 #include "snake.h"
 
@@ -19,32 +19,42 @@ const int OPCIONES_POR_PAGINA = 4;
 
 bool gameSnakeRunning = false;
 
-
 // Variables para el modo edición de offset
 bool editingOffset = false;
-float offsetTemp = 0.0;  // Valor temporal para el offset mientras se edita
+float offsetTemp = 0.0f;  // Valor temporal para el offset mientras se edita
 
 // Variables globales para el menú
-int menuOpcion = 0;
+int  menuOpcion = 0;
 bool menuActivo = false;
 bool batteryMenuActive = false; // Para el menú de batería
 
 // Declaración de variables externas de configuración (definidas en config.cpp)
 extern bool unidadMetros;
-extern int brilloPantalla;
-extern int altFormat;
+extern int  brilloPantalla;
+extern int  altFormat;
 extern bool bleActivo;
 extern unsigned long ahorroTimeoutMs;
-extern int ahorroTimeoutOption;
-extern float alturaOffset; // Offset de altitud en metros
+extern int  ahorroTimeoutOption;
+extern float alturaOffset;     // Offset de altitud en metros
+extern String usuarioActual;
 
-// Se asume que cachedBatteryPercentage se define en sensor_module.cpp
-extern int cachedBatteryPercentage;
+// Variables provenientes del módulo de sensor / UI
+extern int   cachedBatteryPercentage;
+extern uint32_t jumpCount;
+extern bool  pantallaEncendida;
 
 // Variable para el timeout del menú
 long lastMenuInteraction = 0;
 
+// === Nuevos extern para la lógica de salto ===
+// NOTA: Estos flags los actualiza sensor_module.cpp
+extern float altCalculada;   // Altitud relativa en metros (ya con offset), actualizada por el sensor
+extern bool  jumpArmed;      // "armado" (contorno)
+extern bool  inJump;         // "en salto" confirmado (relleno)
+
+// ---------------------------------------------------------------------------
 // Función para inicializar la UI
+// ---------------------------------------------------------------------------
 void initUI() {
   u8g2.begin();
   u8g2.setPowerSave(false);
@@ -59,7 +69,9 @@ void initUI() {
   }
 }
 
+// ---------------------------------------------------------------------------
 // Función para mostrar la cuenta regresiva de startup
+// ---------------------------------------------------------------------------
 void mostrarCuentaRegresiva() {
   static unsigned long startupStartTime = 0;
   if (startupStartTime == 0) startupStartTime = millis();
@@ -82,12 +94,15 @@ void mostrarCuentaRegresiva() {
   u8g2.sendBuffer();
   
   if (elapsed >= 3000) startupDone = true;
-  // Beep de 1 segundo al finalizar la configuración inicial
+
+  // Beep de 1 segundo al finalizar la configuración inicial (igual que tu versión)
   buzzerBeep(2000, 240, 1000);
   delay(100);
 }
 
+// ---------------------------------------------------------------------------
 // Función para dibujar el menú principal (no en edición)
+// ---------------------------------------------------------------------------
 void dibujarMenu() {
   int paginaActual = menuOpcion / OPCIONES_POR_PAGINA;
   int totalPaginas = (TOTAL_OPCIONES + OPCIONES_POR_PAGINA - 1) / OPCIONES_POR_PAGINA;
@@ -133,13 +148,12 @@ void dibujarMenu() {
         u8g2.print("BL: ");
         u8g2.print(bleActivo ? "ON" : "OFF");
         break;
-      case 5:
+      case 5: {
         u8g2.print("Invertir: ");
-        {
-          extern bool inversionActiva;
-          u8g2.print(inversionActiva ? "ON" : "OFF");
-        }
+        extern bool inversionActiva;
+        u8g2.print(inversionActiva ? "ON" : "OFF");
         break;
+      }
       case 6:
         u8g2.print("Ahorro: ");
         if (ahorroTimeoutMs == 0)
@@ -153,7 +167,7 @@ void dibujarMenu() {
           u8g2.print(alturaOffset, 2);
           u8g2.print(" m");
         } else {
-          u8g2.print(alturaOffset * 3.281, 0);
+          u8g2.print(alturaOffset * 3.281f, 0);
           u8g2.print(" ft");
         }
         break;
@@ -176,7 +190,9 @@ void dibujarMenu() {
   u8g2.sendBuffer();
 }
 
+// ---------------------------------------------------------------------------
 // Función que dibuja la pantalla de edición del offset
+// ---------------------------------------------------------------------------
 void dibujarOffsetEdit() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_ncenB08_tr);
@@ -188,13 +204,15 @@ void dibujarOffsetEdit() {
     u8g2.print(offsetTemp, 2);
     u8g2.print(" m");
   } else {
-    u8g2.print(offsetTemp * 3.281, 0);
+    u8g2.print(offsetTemp * 3.281f, 0);
     u8g2.print(" ft");
   }
   u8g2.sendBuffer();
 }
 
+// ---------------------------------------------------------------------------
 // Función que ejecuta la acción correspondiente a la opción del menú
+// ---------------------------------------------------------------------------
 static void ejecutarOpcionMenu(int opcion) {
   switch(opcion) {
     case 0: // Cambiar unidad
@@ -271,18 +289,20 @@ static void ejecutarOpcionMenu(int opcion) {
   saveConfig();
 }
 
+// ---------------------------------------------------------------------------
 // Función para procesar la navegación del menú
+// ---------------------------------------------------------------------------
 void processMenu() {
   // Si estamos en modo de edición del offset, procesamos los botones para incrementar/decrementar
   if (editingOffset) {
     bool updated = false;  // Bandera para saber si se modificó el valor
-    // Incrementar el offset con BUTTON_ALTITUDE
+    // Incrementar el offset con BUTTON_MENU
     if (digitalRead(BUTTON_MENU) == LOW) {
       delay(50);  // debounce
       if (unidadMetros) {
-        offsetTemp += 30;  // Incrementa 0.1 m
+        offsetTemp += 30;  // (tu comentario decía 0.1 m; aquí respeta tu valor actual)
       } else {
-        offsetTemp += 100.0 / 3.281;  // Incrementa 10 ft (convertido a m)
+        offsetTemp += 100.0f / 3.281f;  // 10 ft (convertido a m)
       }
       updated = true;
       Serial.print("Offset temporal incrementado: ");
@@ -291,13 +311,13 @@ void processMenu() {
         delay(10);
       }
     }
-    // Decrementar el offset con BUTTON_MENU
+    // Decrementar el offset con BUTTON_ALTITUDE
     if (digitalRead(BUTTON_ALTITUDE) == LOW) {
       delay(50);  // debounce
       if (unidadMetros) {
-        offsetTemp -= 30;  // Decrementa 0.1 m
+        offsetTemp -= 30;
       } else {
-        offsetTemp -= 100.0 / 3.281;  // Decrementa 10 ft (convertido a m)
+        offsetTemp -= 100.0f / 3.281f;
       }
       updated = true;
       Serial.print("Offset temporal decrementado: ");
@@ -321,7 +341,7 @@ void processMenu() {
         Serial.print(alturaOffset, 2);
         Serial.println(" m");
       } else {
-        Serial.print(alturaOffset * 3.281, 0);
+        Serial.print(alturaOffset * 3.281f, 0);
         Serial.println(" ft");
       }
       while(digitalRead(BUTTON_OLED) == LOW) {
@@ -366,15 +386,16 @@ void processMenu() {
   }
 }
 
+// ---------------------------------------------------------------------------
 // Función de actualización de la UI (se llama en cada loop)
+// ---------------------------------------------------------------------------
 void updateUI() {
   if (!startupDone) {
     mostrarCuentaRegresiva();
     return;
   }
   if (gameSnakeRunning) return; // No actualizamos la UI si el juego está activo.
-// ... resto de la función
-  
+
   if (!menuActivo) {
     // Pantalla principal
     u8g2.clearBuffer();
@@ -398,39 +419,26 @@ void updateUI() {
     u8g2.setCursor(128 - batWidth - 2, 12);
     u8g2.print(batStr);
     
-    // Calcular la altitud real y la altitud relativa (incorporando el offset)
-    float altActual = bmp.readAltitude(1013.25);
-    float altCalculada = altActual - altitudReferencia + alturaOffset;
+    // Altitud relativa ya calculada (NO leer el sensor aquí)
+    float altRel = altCalculada;           // metros
     if (!unidadMetros) {
-      altCalculada *= 3.281;
+      altRel *= 3.281f;                    // pies
     }
-    
-      // si está en umbral, mostrar 0
-       String altDisplay;
-       float umbral = unidadMetros ? 6.1 : 20.0;
-       if (fabs(altCalculada) < umbral) {
-         altDisplay = String((long)altCalculada);//"0";
-       } else {
-         if (altFormat == 0) {
-           altDisplay = String((long)altCalculada);
-         } else {
-           float altScaled = altCalculada * 0.001;
-           float altTrunc = floor(altScaled * pow(10, altFormat)) / pow(10, altFormat);
-           altDisplay = String(altTrunc, altFormat);
-         }
-       }
 
-      // Después, siempre mostramos la altura:
-      //String altDisplay;
-      //if (altFormat == 0) {
-        // Sin decimales: truncamos a entero
-       // altDisplay = String((long)altCalculada);
-      //} else {
-        // Con decimales según altFormat
-      //  float altTrunc = floor(altCalculada * pow(10, altFormat)) / pow(10, altFormat);
-      //  altDisplay = String(altTrunc, altFormat);
-      //}
-
+    // Formateo de altura (tu lógica con umbral y decimales)
+    String altDisplay;
+    float umbral = unidadMetros ? 6.1f : 20.0f;
+    if (fabs(altRel) < umbral) {
+      altDisplay = String((long)altRel);
+    } else {
+      if (altFormat == 0) {
+        altDisplay = String((long)altRel);
+      } else {
+        float scale = powf(10.0f, altFormat);
+        float altTrunc = floorf(altRel * scale) / scale;
+        altDisplay = String(altTrunc, altFormat);
+      }
+    }
     
     // Mostrar la altitud en grande, centrada
     u8g2.setFont(u8g2_font_fub30_tr);
@@ -462,11 +470,11 @@ void updateUI() {
     u8g2.setCursor(xPosJump, yPosJump);
     u8g2.print(jumpStr);
     
-    // Mostrar indicador de "en salto" en la esquina inferior izquierda
-    extern bool enSalto;
-    extern bool ultraPreciso;
-    if (enSalto) {
-      if (ultraPreciso) {
+    // Indicador de armado/salto en la esquina inferior izquierda
+    //   - jumpArmed = true, inJump = false  → contorno
+    //   - inJump = true                     → relleno
+    if (jumpArmed || inJump) {
+      if (inJump) {
         u8g2.drawDisc(14, 58, 4);
       } else {
         u8g2.drawCircle(14, 58, 4);
@@ -482,10 +490,10 @@ void updateUI() {
     } else if (batteryMenuActive) {
       if (pantallaEncendida) {
         int lecturaADC = adc1_get_raw(ADC1_CHANNEL_1);
-        float voltajeADC = (lecturaADC / 4095.0) * 2.6;
-        float factorCorreccion = 1.2;
+        float voltajeADC = (lecturaADC / 4095.0f) * 2.6f;
+        float factorCorreccion = 1.2f;
         float v_adc = voltajeADC;
-        float v_bat = v_adc * 2.0 * factorCorreccion;
+        float v_bat = v_adc * 2.0f * factorCorreccion;
         u8g2.clearBuffer();
         u8g2.setFont(u8g2_font_ncenB08_tr);
         u8g2.setCursor(0,12);
