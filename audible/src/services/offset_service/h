@@ -1,0 +1,22 @@
+#pragma once
+#include "config/device_config.h"
+#include "config/nvs_store.h"
+#include <algorithm>
+
+class OffsetService {
+public:
+  OffsetService(DeviceConfig& cfg) : c(cfg) {}
+  // delta_mm: suma (puede ser negativo)
+  // set_abs: si true, fija valor absoluto (mm)
+  bool adjust(int32_t value_mm, bool set_abs=false) {
+    const int32_t LIM = 1500000; // ±1500 m
+    int32_t nv = set_abs ? value_mm : (c.offset_mm + value_mm);
+    nv = std::max(-LIM, std::min(LIM, nv));
+    if (nv == c.offset_mm) return true;
+    c.offset_mm = nv;
+    return cfgSave(c);
+  }
+  int32_t current() const { return c.offset_mm; }
+private:
+  DeviceConfig& c;
+};
