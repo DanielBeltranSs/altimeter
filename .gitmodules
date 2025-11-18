@@ -1,3 +1,0 @@
-[submodule "firmwareOled/lib/BMP3_SensorAPI"]
-	path = firmwareOled/lib/BMP3_SensorAPI
-	url = https://github.com/BoschSensortec/BMP3-Sensor-API.git
